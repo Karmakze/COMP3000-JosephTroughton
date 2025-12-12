@@ -59,7 +59,6 @@ FEATURE_COLS = [
 
 
 def list_dataset_files() -> dict:
-    # Grab Files
     print("Fetching file list from Hugging Face...")
     files = list_repo_files(DATASET_REPO, repo_type="dataset") # ~1592 files
     
@@ -68,7 +67,7 @@ def list_dataset_files() -> dict:
     with_cheater_files = {"parquet": [], "json": []}
 
     
-    # Can Present either .parquet or .json files
+    # Use Parquet and JSON files
     for f in files:
         if "no_cheater_present" in f:
             if f.endswith(".parquet"):
@@ -179,7 +178,7 @@ def load_cheater_samples(
     # LOAD ONLY NEEDED COLUMNS
     cols_to_load = FEATURE_COLS + ["steamid"]
     
-    # Match parquet and JSON files by their base number
+    # Pair tick data and cheater metadata
     parquet_bases = {}
     for f in parquet_files:
         base = Path(f).stem  # "0"
@@ -201,29 +200,25 @@ def load_cheater_samples(
         json_file = json_bases[base]
         
         try:
-            # Download JSON first (small file)
             json_path = download_file(json_file, cache_dir)
-            
-            # Get cheater steamids from JSON
             cheater_steamids = extract_cheater_steamids(json_path)
             
             if not cheater_steamids:
                 continue
             
-            # Download and load only needed columns
+            # Load Only Needed Columns
             parquet_path = download_file(parquet_file, cache_dir)
             df = pd.read_parquet(parquet_path, columns=cols_to_load)
             
-            # Filter to only cheater ticks
             if "steamid" in df.columns:
                 df["steamid"] = df["steamid"].astype(str)
                 cheater_df = df[df["steamid"].isin(cheater_steamids)].copy()
                 
-                # Free full dataframe
+                # Free Memory !IMPORTANT!
                 del df
                 
                 if len(cheater_df) > 0:
-                    # Sample from cheaters
+                    # Sample
                     if len(cheater_df) > samples_per_cheater:
                         cheater_df = cheater_df.sample(n=samples_per_cheater, random_state=42)
                     
@@ -245,10 +240,6 @@ def load_cheater_samples(
 
 
 def prepare_features(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, list]:
-    """
-    Prepare feature matrix and labels from the dataset.
-    Engineer features useful for detecting aim assistance.
-    """
     # Select available feature columns
     available_cols = [col for col in FEATURE_COLS if col in df.columns]
     print(f"\nUsing {len(available_cols)} base features")
@@ -417,7 +408,6 @@ def main():
     print("CS2CD Cheat Detection Model Training")
     print("="*60)
     
-    # Get file listing
     file_list = list_dataset_files()
     
     
@@ -428,11 +418,11 @@ def main():
         cache_dir=cache_dir,
     )
     
-    # Load cheater samples (from with_cheater_present)
+    
     cheater_df = load_cheater_samples(
         file_list,
         n_matches=200,
-        samples_per_cheater=1000,  # (~15k total)
+        samples_per_cheater=1000,  # ~15k total
         cache_dir=cache_dir,
     )
     
