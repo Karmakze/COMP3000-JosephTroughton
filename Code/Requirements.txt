@@ -15,6 +15,9 @@ scikit-learn>=1.4
 datasets>=2.18.0        # Hugging Face datasets
 huggingface_hub>=0.21.0 # Download CS2CD files directly
 
+# UI
+PyQt6>=6.6
+
 # quality of life
 tqdm>=4.66
 python-dotenv>=1.0.0
