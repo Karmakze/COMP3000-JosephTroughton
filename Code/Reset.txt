@@ -1,0 +1,7 @@
+cd "Location of workspace"
+source .venv/bin/activate.fish
+deactivate
+rm -rf .venv
+python -m venv .venv
+source .venv/bin/activate.fish
+pip install -r Requirements.txt

@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
-
+from DemoParse2_Ingestion import run_ingestion
 app = QApplication([])
 win = QMainWindow()
 
@@ -15,9 +15,13 @@ file_menu = menubar.addMenu("&File")
 
 def on_open_demo():
     path, _ = QFileDialog.getOpenFileName(win, "Open Demo", "", "Demo files (*.dem *.dem.gz)")
-    if path:
-        # TODO: load demo and add to selector
-        pass
+    if not path:
+        return
+    df, results = run_ingestion(path)
+    print(df)
+    print(results)
+    # TODO: load demo and add to selector
+    pass
 
 def on_open_folder():
     path = QFileDialog.getExistingDirectory(win, "Open Demo Folder")
