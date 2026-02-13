@@ -1,7 +1,7 @@
 #TODO - Everything
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
-    QLabel, QFileDialog,
+    QLabel, QFileDialog, QInputDialog, QListWidget,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
@@ -13,15 +13,35 @@ win = QMainWindow()
 menubar = win.menuBar()
 file_menu = menubar.addMenu("&File")
 
+# Store demo paths mapped to their display names need to be cached in file in future 
+demo_paths = {} # TEST ONLY
+
 def on_open_demo():
     path, _ = QFileDialog.getOpenFileName(win, "Open Demo", "", "Demo files (*.dem *.dem.gz)")
     if not path:
         return
-    df, results = run_ingestion(path)
-    print(df)
-    print(results)
+    # df, results = run_ingestion(path)
+    # print(df)
+    # print(results)
     # TODO: load demo and add to selector
-    pass
+
+    # Prompt Name of Demo
+    name, ok = QInputDialog.getText(win, "Enter Name of Demo", "Name:")
+    if not name or not ok:
+        return
+    # Add to selector
+    selector.addItem(name)
+    demo_paths[name] = path
+
+def on_demo_selected(item):
+    """Handle when a demo is clicked/selected in the list"""
+    demo_name = item.text()
+    if demo_name in demo_paths:
+        path = demo_paths[demo_name]
+        # TODO: Load and display the selected demo
+        print(f"Selected demo: {demo_name} at {path}")
+        # df, results = run_ingestion(path)
+        # Update UI with demo data
 
 def on_open_folder():
     path = QFileDialog.getExistingDirectory(win, "Open Demo Folder")
@@ -54,7 +74,10 @@ main_layout = QVBoxLayout(central)
 h_split = QSplitter(Qt.Orientation.Horizontal)
 
 left_split = QSplitter(Qt.Orientation.Vertical)
-left_split.addWidget(QLabel("Demo Selector"))
+selector = QListWidget()
+selector.setAlternatingRowColors(True)
+selector.itemClicked.connect(on_demo_selected)
+left_split.addWidget(selector)
 left_split.addWidget(QLabel("Kill Feed"))
 
 right_split = QSplitter(Qt.Orientation.Vertical)
