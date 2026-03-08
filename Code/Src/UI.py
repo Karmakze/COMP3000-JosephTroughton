@@ -1,7 +1,7 @@
-#TODO - Everything
+from asyncio import run_coroutine_threadsafe
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
-    QLabel, QFileDialog, QInputDialog, QListWidget,
+    QLabel, QFileDialog, QInputDialog, QListWidget, QPushButton,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
@@ -14,7 +14,12 @@ menubar = win.menuBar()
 file_menu = menubar.addMenu("&File")
 
 # Store demo paths mapped to their display names need to be cached in file in future 
-demo_paths = {} # TEST ONLY
+demo_paths = {
+    "Demo 1": "/home/karmakaze/Git/Single Demos/Pro/iem-krakw-2026-faze-vs-bcgame/faze-vs-bc-game-m3-ancient.dem",
+    "Demo 2": "/home/karmakaze/Git/Single Demos/Pro/iem-krakw-2026-faze-vs-bcgame/faze-vs-bc-game-m2-nuke.dem",
+    "Demo 3": "/home/karmakaze/Git/Single Demos/Pro/iem-krakw-2026-faze-vs-bcgame/faze-vs-bc-game-m1-dust2.dem",
+
+} # TEMP PATHs
 
 def on_open_demo():
     path, _ = QFileDialog.getOpenFileName(win, "Open Demo", "", "Demo files (*.dem *.dem.gz)")
@@ -23,8 +28,6 @@ def on_open_demo():
     # df, results = run_ingestion(path)
     # print(df)
     # print(results)
-    # TODO: load demo and add to selector
-
     # Prompt Name of Demo
     name, ok = QInputDialog.getText(win, "Enter Name of Demo", "Name:")
     if not name or not ok:
@@ -34,20 +37,39 @@ def on_open_demo():
     demo_paths[name] = path
 
 def on_demo_selected(item):
-    """Handle when a demo is clicked/selected in the list"""
     demo_name = item.text()
-    if demo_name in demo_paths:
-        path = demo_paths[demo_name]
-        # TODO: Load and display the selected demo
-        print(f"Selected demo: {demo_name} at {path}")
-        # df, results = run_ingestion(path)
-        # Update UI with demo data
+    if demo_name not in demo_paths:
+        return
+    path = demo_paths[demo_name]
+    # TODO: Load and display the selected demo
+    print(f"Selected demo: {demo_name} at {path}")
+    # df, results = run_ingestion(path)
+    # Update UI with demo data
+
+
+def run_ingestion_analysis():
+    item = selector.currentItem()
+    if item is None:
+        print("No demo selected for ingestion.")
+        return
+
+    demo_name = item.text()
+    path = demo_paths.get(demo_name)
+    if not path:
+        print(f"No path found for demo '{demo_name}'.")
+        return
+
+    print(f"Running test ingestion for {demo_name} at {path}")
+    df, results = run_ingestion(path)
+    print(df)
+    print(results)
 
 def on_open_folder():
     path = QFileDialog.getExistingDirectory(win, "Open Demo Folder")
-    if path:
-        # TODO: scan folder for demos and add to selector
-        pass
+    if not path:
+        return
+    # TODO: scan folder for demos and add to selector
+    pass
 
 open_action = QAction("&Open Demo...", win)
 open_action.setShortcut("Ctrl+O")
@@ -70,6 +92,13 @@ file_menu.addAction(exit_action)
 central = QWidget()
 main_layout = QVBoxLayout(central)
 
+button_row = QHBoxLayout()
+test_ingest_button = QPushButton("Analyse Selected Demo")
+test_ingest_button.clicked.connect(run_ingestion_analysis)
+button_row.addWidget(test_ingest_button)
+button_row.addStretch()
+main_layout.addLayout(button_row)
+
 # Horizontal splitter (left | right)
 h_split = QSplitter(Qt.Orientation.Horizontal)
 
@@ -78,6 +107,7 @@ selector = QListWidget()
 selector.setAlternatingRowColors(True)
 selector.itemClicked.connect(on_demo_selected)
 left_split.addWidget(selector)
+selector.addItems(list(demo_paths.keys()))
 left_split.addWidget(QLabel("Kill Feed"))
 
 right_split = QSplitter(Qt.Orientation.Vertical)
