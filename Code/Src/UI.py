@@ -1,11 +1,13 @@
-import pandas as pd
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QLabel, QFileDialog, QInputDialog, QListWidget, QPushButton,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 from DemoParse2_Ingestion import run_ingestion
+from Match_Stats import get_name_from_steamid, calc_killfeed, calc_scoreboard
 app = QApplication([])
 win = QMainWindow()
 
@@ -36,6 +38,22 @@ def on_open_demo():
     selector.addItem(name)
     demo_paths[name] = path
 
+def _fill_scoreboard(rows):
+    scoreboard.setRowCount(0)
+    if not rows:
+        return
+    headers = ["Player", "K", "D", "ADR", "HS%", "Util%", "Running%", "TTD", "Cheat%"]
+    keys = ["name", "k", "d", "adr_str", "hs_str", "util_str", "running_str", "ttk_str", "cheat_str"]
+    scoreboard.setRowCount(len(rows))
+    for c, col in enumerate(headers):
+        scoreboard.setHorizontalHeaderItem(c, QTableWidgetItem(col))
+    for row_idx, row in enumerate(rows):
+        for col_idx, key in enumerate(keys):
+            val = row.get(key, "")
+            scoreboard.setItem(row_idx, col_idx, QTableWidgetItem(str(val)))
+    scoreboard.resizeColumnsToContents()
+
+
 def on_demo_selected(item):
     demo_name = item.text()
     if demo_name not in demo_paths:
@@ -57,37 +75,15 @@ def run_ingestion_analysis():
     if not path:
         return
 
-    df, results, kills_df = run_ingestion(path)
+    df, results, kills_df, hurts_df, num_rounds = run_ingestion(path)
+    steamid_to_name = get_name_from_steamid(df)
 
-    # Kill feed: [Killer] -> [Weapon] -> [Victim]
     kill_feed_list.clear()
-    if kills_df is None or len(kills_df) == 0:
-        kill_feed_list.addItem("(No kills in this demo)")
-        return
+    for line in calc_killfeed(kills_df, results, steamid_to_name):
+        kill_feed_list.addItem(line)
 
-    steamid_to_name = {} if "steamid" not in df.columns or "name" not in df.columns else {
-        str(r["steamid"]): r["name"] or "?"
-        for _, r in df[["steamid", "name"]].drop_duplicates("steamid").iterrows()
-        if str(r["steamid"]) and str(r["steamid"]) != "nan"
-    }
-
-    def name_for(steamid):
-        if pd.isna(steamid) or str(steamid) == "nan":
-            return "?"
-        return steamid_to_name.get(str(steamid), str(steamid))
-
-    name_to_legitness = {r["name"]: (1 - r["mean_probability"]) * 100 for r in results}
-    att_col = next((c for c in ["attacker_steamid", "attackerSteamId", "attacker"] if c in kills_df.columns), None)
-    vic_col = next((c for c in ["user_steamid", "victimSteamId", "victim", "user"] if c in kills_df.columns), None)
-    weapon_col = "weapon" if "weapon" in kills_df.columns else None
-
-    for _, kill in kills_df.iterrows():
-        killer = name_for(kill.get(att_col)) if att_col else "?"
-        victim = name_for(kill.get(vic_col)) if vic_col else "?"
-        weapon = (str(kill.get(weapon_col, "")).strip() if weapon_col else "") or "?"
-        legitness = name_to_legitness.get(killer)
-        legitness_str = f" — {legitness:.0f}% legit" if legitness is not None else ""
-        kill_feed_list.addItem(f"[{killer}] -> [{weapon}] -> [{victim}]{legitness_str}")
+    rows = calc_scoreboard(df, results, kills_df, hurts_df, num_rounds, steamid_to_name)
+    _fill_scoreboard(rows)
 
 def on_open_folder():
     path = QFileDialog.getExistingDirectory(win, "Open Demo Folder")
@@ -139,7 +135,19 @@ left_split.addWidget(kill_feed_list)
 
 right_split = QSplitter(Qt.Orientation.Vertical)
 right_split.addWidget(QLabel("Player Stats & Model"))
-right_split.addWidget(QLabel("Scoreboard"))
+scoreboard = QTableWidget()
+scoreboard.setColumnCount(9)
+scoreboard.setAlternatingRowColors(True)
+# All columns share horizontal space evenly and scale with the window
+scoreboard.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+scoreboard.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+scoreboard.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+scoreboard.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+scoreboard.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+scoreboard.setMinimumSize(0, 0)
+scoreboard.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+scoreboard.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+right_split.addWidget(scoreboard)
 
 h_split.addWidget(left_split)
 h_split.addWidget(right_split)

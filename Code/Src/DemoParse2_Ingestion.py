@@ -48,7 +48,6 @@ FEATURE_COLS = [
 
 
 def load_model():
-    """Load the trained model and feature names."""
     model_path = BASE_DIR / "data" / "outputs" / "xgb_cs2cd_cheat_detector.joblib"
     features_path = BASE_DIR / "data" / "outputs" / "feature_names.json"
     
@@ -69,21 +68,32 @@ def load_model():
     return model, feature_names
 
 
-def parse_demo(demo_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Parse demo file and extract tick data with required features and kill events."""
+def parse_demo(demo_path: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, int | None]:
+    """Parse demo: tick data, kill events, optional player_hurt, and round count."""
     if not demo_path.exists():
         raise FileNotFoundError(f"Demo file not found: {demo_path}")
     
     parser = DemoParser(str(demo_path))
-    
-    # Request all features needed for the model
     props_to_parse = FEATURE_COLS + ["steamid", "name"]
-    
     df = parser.parse_ticks(props_to_parse)
-    
     kills_df = parser.parse_event("player_death")
     
-    return df, kills_df
+    hurts_df = None
+    num_rounds = None
+    try:
+        h = parser.parse_event("player_hurt")
+        if h is not None and len(h) > 0:
+            hurts_df = h
+    except Exception:
+        pass
+    try:
+        re = parser.parse_event("round_end")
+        if re is not None and len(re) > 0:
+            num_rounds = int(len(re))
+    except Exception:
+        pass
+    
+    return df, kills_df, hurts_df, num_rounds
 
 
 def prepare_features(df: pd.DataFrame, feature_names: list) -> np.ndarray:
@@ -139,7 +149,6 @@ def analyze_player(
     player_probs: np.ndarray,
     threshold: float = 0.5,
 ) -> dict:
-    """Analyze prediction results for a single player."""
     return {
         "name": player_name,
         "total_ticks": len(player_probs),
@@ -153,14 +162,13 @@ def analyze_player(
 
 
 def run_ingestion(demo_path: str, threshold: float = 0.5):
-    """Run cheat detection inference on a demo file. Returns (df, results, kills_df)."""
     demo_path = Path(demo_path)
     
     # Load model
     model, feature_names = load_model()
     
-    # Parse demo (ticks + kill events)
-    df, kills_df = parse_demo(demo_path)
+    # Parse demo (ticks + kill events + optional hurt events + round count)
+    df, kills_df, hurts_df, num_rounds = parse_demo(demo_path)
     
     # Check for missing columns
     missing_cols = set(FEATURE_COLS) - set(df.columns)
@@ -198,7 +206,7 @@ def run_ingestion(demo_path: str, threshold: float = 0.5):
     # Sort by mean probability (most suspicious first)
     results.sort(key=lambda x: x["mean_probability"], reverse=True)
     
-    return df, results, kills_df
+    return df, results, kills_df, hurts_df, num_rounds
 
 
 def main():
@@ -225,7 +233,7 @@ def main():
     
     args = parser.parse_args()
     
-    df, results, kills_df = run_ingestion(args.demo_path, args.threshold)
+    df, results, kills_df, hurts_df, num_rounds = run_ingestion(args.demo_path, args.threshold)
     
     if args.output:
         output_path = Path(args.output)
