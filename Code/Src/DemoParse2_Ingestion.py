@@ -69,25 +69,21 @@ def load_model():
     return model, feature_names
 
 
-def parse_demo(demo_path: Path) -> pd.DataFrame:
-    """Parse demo file and extract tick data with required features."""
+def parse_demo(demo_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Parse demo file and extract tick data with required features and kill events."""
     if not demo_path.exists():
         raise FileNotFoundError(f"Demo file not found: {demo_path}")
     
-    print(f"\nParsing demo: {demo_path}")
     parser = DemoParser(str(demo_path))
     
     # Request all features needed for the model
     props_to_parse = FEATURE_COLS + ["steamid", "name"]
     
-    print("Extracting tick data...")
     df = parser.parse_ticks(props_to_parse)
     
-    print(f"  Extracted {len(df):,} tick rows")
-    print(f"  Players found: {df['name'].nunique()}")
-    print(f"  Columns: {sorted(df.columns)}")
+    kills_df = parser.parse_event("player_death")
     
-    return df
+    return df, kills_df
 
 
 def prepare_features(df: pd.DataFrame, feature_names: list) -> np.ndarray:
@@ -157,14 +153,14 @@ def analyze_player(
 
 
 def run_ingestion(demo_path: str, threshold: float = 0.5):
-    """Run cheat detection inference on a demo file."""
+    """Run cheat detection inference on a demo file. Returns (df, results, kills_df)."""
     demo_path = Path(demo_path)
     
     # Load model
     model, feature_names = load_model()
     
-    # Parse demo
-    df = parse_demo(demo_path)
+    # Parse demo (ticks + kill events)
+    df, kills_df = parse_demo(demo_path)
     
     # Check for missing columns
     missing_cols = set(FEATURE_COLS) - set(df.columns)
@@ -175,12 +171,9 @@ def run_ingestion(demo_path: str, threshold: float = 0.5):
             df[col] = 0
     
     # Prepare features
-    print("\nPreparing features...")
     X = prepare_features(df, feature_names)
-    print(f"Feature matrix shape: {X.shape}")
     
     # Run predictions
-    print("\nRunning predictions...")
     predictions = model.predict(X)
     probabilities = model.predict_proba(X)[:, 1]
     
@@ -205,29 +198,7 @@ def run_ingestion(demo_path: str, threshold: float = 0.5):
     # Sort by mean probability (most suspicious first)
     results.sort(key=lambda x: x["mean_probability"], reverse=True)
     
-    for r in results:
-        status = "⚠ SUSPICIOUS" if r["mean_probability"] > threshold else "✓ Clean"
-        print(f"{r['name']}")
-        print(f"  Mean cheat probability: {r['mean_probability']:.2%}")
-        print(f"  Max probability: {r['max_probability']:.2%}")
-        print(f"  Ticks above {threshold}: {r['ticks_above_threshold']:,} ({r['percent_above_threshold']:.1f}%)")
-        print(f"  Status: {status}")
-        print()
-    
-    print(f"{'='*60}")
-    print("SUMMARY")
-    print(f"{'='*60}")
-    
-    suspicious = [r for r in results if r["mean_probability"] > threshold]
-    print(f"Total players analyzed: {len(results)}")
-    print(f"Suspicious players: {len(suspicious)}")
-    
-    if suspicious:
-        print("\nMost suspicious players:")
-        for r in suspicious[:5]:
-            print(f"  - {r['name']}: {r['mean_probability']:.2%} avg probability")
-    
-    return df, results
+    return df, results, kills_df
 
 
 def main():
@@ -254,7 +225,7 @@ def main():
     
     args = parser.parse_args()
     
-    df, results = run_ingestion(args.demo_path, args.threshold)
+    df, results, kills_df = run_ingestion(args.demo_path, args.threshold)
     
     if args.output:
         output_path = Path(args.output)

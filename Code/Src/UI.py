@@ -1,4 +1,4 @@
-from asyncio import run_coroutine_threadsafe
+import pandas as pd
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QLabel, QFileDialog, QInputDialog, QListWidget, QPushButton,
@@ -50,19 +50,44 @@ def on_demo_selected(item):
 def run_ingestion_analysis():
     item = selector.currentItem()
     if item is None:
-        print("No demo selected for ingestion.")
         return
 
     demo_name = item.text()
     path = demo_paths.get(demo_name)
     if not path:
-        print(f"No path found for demo '{demo_name}'.")
         return
 
-    print(f"Running test ingestion for {demo_name} at {path}")
-    df, results = run_ingestion(path)
-    print(df)
-    print(results)
+    df, results, kills_df = run_ingestion(path)
+
+    # Kill feed: [Killer] -> [Weapon] -> [Victim]
+    kill_feed_list.clear()
+    if kills_df is None or len(kills_df) == 0:
+        kill_feed_list.addItem("(No kills in this demo)")
+        return
+
+    steamid_to_name = {} if "steamid" not in df.columns or "name" not in df.columns else {
+        str(r["steamid"]): r["name"] or "?"
+        for _, r in df[["steamid", "name"]].drop_duplicates("steamid").iterrows()
+        if str(r["steamid"]) and str(r["steamid"]) != "nan"
+    }
+
+    def name_for(steamid):
+        if pd.isna(steamid) or str(steamid) == "nan":
+            return "?"
+        return steamid_to_name.get(str(steamid), str(steamid))
+
+    name_to_legitness = {r["name"]: (1 - r["mean_probability"]) * 100 for r in results}
+    att_col = next((c for c in ["attacker_steamid", "attackerSteamId", "attacker"] if c in kills_df.columns), None)
+    vic_col = next((c for c in ["user_steamid", "victimSteamId", "victim", "user"] if c in kills_df.columns), None)
+    weapon_col = "weapon" if "weapon" in kills_df.columns else None
+
+    for _, kill in kills_df.iterrows():
+        killer = name_for(kill.get(att_col)) if att_col else "?"
+        victim = name_for(kill.get(vic_col)) if vic_col else "?"
+        weapon = (str(kill.get(weapon_col, "")).strip() if weapon_col else "") or "?"
+        legitness = name_to_legitness.get(killer)
+        legitness_str = f" — {legitness:.0f}% legit" if legitness is not None else ""
+        kill_feed_list.addItem(f"[{killer}] -> [{weapon}] -> [{victim}]{legitness_str}")
 
 def on_open_folder():
     path = QFileDialog.getExistingDirectory(win, "Open Demo Folder")
@@ -108,7 +133,9 @@ selector.setAlternatingRowColors(True)
 selector.itemClicked.connect(on_demo_selected)
 left_split.addWidget(selector)
 selector.addItems(list(demo_paths.keys()))
-left_split.addWidget(QLabel("Kill Feed"))
+kill_feed_list = QListWidget()
+kill_feed_list.setAlternatingRowColors(True)
+left_split.addWidget(kill_feed_list)
 
 right_split = QSplitter(Qt.Orientation.Vertical)
 right_split.addWidget(QLabel("Player Stats & Model"))
