@@ -2,6 +2,7 @@
 Pure calculation helpers for demo stats. No UI dependencies.
 """
 
+import numpy as np
 import pandas as pd
 
 # Demo tick rate and engagement forget window
@@ -37,21 +38,75 @@ def get_name_from_steamid(df):
     }
 
 
-def calc_killfeed(kills_df, results, steamid_to_name):
+def _per_kill_cheat_prob(df: pd.DataFrame | None, killer_name: str, kill_tick: int | None) -> float | None:
+    """
+    Return cheat_probability for killer at/near a kill tick.
+    Uses the nearest tick for that player; prefers exact/previous tick when between samples.
+    """
+    if df is None or df.empty:
+        return None
+    if not killer_name or killer_name == "?":
+        return None
+    if "name" not in df.columns or "cheat_probability" not in df.columns:
+        return None
+    if "tick" not in df.columns or kill_tick is None:
+        return None
+
+    sub = df.loc[df["name"] == killer_name, ["tick", "cheat_probability"]].dropna(subset=["tick", "cheat_probability"])
+    if sub.empty:
+        return None
+
+    ticks = sub["tick"].to_numpy()
+    probs = sub["cheat_probability"].to_numpy()
+    try:
+        ticks_i = ticks.astype(np.int64, copy=False)
+    except Exception:
+        ticks_i = ticks.astype(np.int64)
+
+    order = np.argsort(ticks_i, kind="stable")
+    ticks_i = ticks_i[order]
+    probs = probs[order]
+
+    t = int(kill_tick)
+    idx = int(np.searchsorted(ticks_i, t, side="right") - 1)
+    if idx < 0:
+        idx = 0
+
+    # if the next tick is closer, use it
+    if idx + 1 < len(ticks_i):
+        if abs(int(ticks_i[idx + 1]) - t) < abs(int(ticks_i[idx]) - t):
+            idx = idx + 1
+
+    try:
+        p = float(probs[idx])
+    except Exception:
+        return None
+    return p if np.isfinite(p) else None
+
+
+def calc_killfeed(kills_df, df, results, steamid_to_name):
     if kills_df is None or len(kills_df) == 0:
         return ["(No kills in this demo)"]
-    name_to_legitness = {r["name"]: (1 - r["mean_probability"]) * 100 for r in results}
     att_col = _resolve_col(kills_df, KILL_ATTACKER_COLS)
     vic_col = _resolve_col(kills_df, KILL_VICTIM_COLS)
     weapon_col = "weapon" if "weapon" in kills_df.columns else None
+    kill_tick_col = "tick" if "tick" in kills_df.columns else None
     lines = []
     for _, kill in kills_df.iterrows():
         killer = _name_for(kill.get(att_col), steamid_to_name) if att_col else "?"
         victim = _name_for(kill.get(vic_col), steamid_to_name) if vic_col else "?"
         weapon = (str(kill.get(weapon_col, "")).strip() if weapon_col else "") or "?"
-        legitness = name_to_legitness.get(killer)
-        legitness_str = f" — {legitness:.0f}% legit" if legitness is not None else ""
-        lines.append(f"[{killer}] -> [{weapon}] -> [{victim}]{legitness_str}")
+
+        kill_tick = None
+        if kill_tick_col:
+            try:
+                kill_tick = int(float(kill.get(kill_tick_col)))
+            except (ValueError, TypeError):
+                kill_tick = None
+
+        cheat_prob = _per_kill_cheat_prob(df, killer, kill_tick)
+        cheat_str = f" — {cheat_prob * 100:.1f}% cheat" if cheat_prob is not None else ""
+        lines.append(f"[{killer}] -> [{weapon}] -> [{victim}]{cheat_str}")
     return lines
 
 

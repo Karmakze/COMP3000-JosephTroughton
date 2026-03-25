@@ -79,7 +79,7 @@ def run_ingestion_analysis():
     steamid_to_name = get_name_from_steamid(df)
 
     kill_feed_list.clear()
-    for line in calc_killfeed(kills_df, results, steamid_to_name):
+    for line in calc_killfeed(kills_df, df, results, steamid_to_name):
         kill_feed_list.addItem(line)
 
     rows = calc_scoreboard(df, results, kills_df, hurts_df, num_rounds, steamid_to_name)
