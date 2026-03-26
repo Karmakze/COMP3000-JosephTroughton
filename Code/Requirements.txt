@@ -17,6 +17,7 @@ huggingface_hub>=0.21.0 # Download CS2CD files directly
 
 # UI
 PyQt6>=6.6
+matplotlib>=3.8
 
 # quality of life
 tqdm>=4.66

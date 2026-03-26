@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+
+def build_player_view_lines(player_name: str) -> list[str]:
+    """
+    Non-UI helper for populating the top-right player view list.
+
+    UI should call this and render the returned lines.
+    """
+    name = (player_name or "").strip()
+    if not name:
+        return []
+    return [f"Name: {name}"]
+
+
+def build_kill_view_lines(killer_name: str, cheat_pct: float | None) -> list[str]:
+    """
+    Non-UI helper for populating the top-right list when a specific kill is selected.
+    """
+    name = (killer_name or "").strip()
+    if not name:
+        return []
+    if cheat_pct is None:
+        return [f"Name: {name}"]
+    return [f"Name: {name}", f"Cheat Chance: {cheat_pct:.1f}%"]
+
+
+def compute_kill_mouse_window(
+    df: pd.DataFrame | None,
+    killer_name: str,
+    kill_tick: int | None,
+    baseline_ticks: int = 20,
+    post_death_ticks: int = 20,
+    search_back_ticks: int = 256,
+) -> dict | None:
+    """
+    Pure (non-UI) kill analysis.
+
+    Returns a dict with:
+      - ticks_rel: np.ndarray (tick - kill_tick)
+      - dx, dy, mag: np.ndarray
+      - start_move_tick: int | None
+    """
+    if df is None or df.empty or kill_tick is None:
+        return None
+    name = (killer_name or "").strip()
+    if not name:
+        return None
+    if "tick" not in df.columns or "name" not in df.columns:
+        return None
+    if "usercmd_mouse_dx" not in df.columns or "usercmd_mouse_dy" not in df.columns:
+        return None
+
+    kt = int(kill_tick)
+    t0 = kt - int(search_back_ticks)
+    t1 = kt + int(post_death_ticks)
+
+    base_cols = ["tick", "usercmd_mouse_dx", "usercmd_mouse_dy"]
+    extra_cols = [c for c in ("pitch", "yaw") if c in df.columns]
+    sub = df.loc[
+        (df["name"] == name) & (df["tick"].between(t0, t1)),
+        base_cols + extra_cols,
+    ].copy()
+    if sub.empty:
+        return None
+
+    sub = sub.dropna(subset=["tick"])
+    if sub.empty:
+        return None
+
+    # sort by tick and coerce to numeric
+    sub["tick"] = pd.to_numeric(sub["tick"], errors="coerce")
+    sub["usercmd_mouse_dx"] = pd.to_numeric(sub["usercmd_mouse_dx"], errors="coerce").fillna(0.0)
+    sub["usercmd_mouse_dy"] = pd.to_numeric(sub["usercmd_mouse_dy"], errors="coerce").fillna(0.0)
+    sub = sub.dropna(subset=["tick"]).sort_values("tick")
+
+    ticks = sub["tick"].to_numpy(dtype=np.int64, copy=False)
+    dx = sub["usercmd_mouse_dx"].to_numpy(dtype=np.float64, copy=False)
+    dy = sub["usercmd_mouse_dy"].to_numpy(dtype=np.float64, copy=False)
+    mag = np.sqrt(dx * dx + dy * dy)
+
+    # Find "start moving" as the last transition from ~0 -> >0 before death tick
+    before_mask = ticks <= kt
+    start_move_tick = None
+    if before_mask.any():
+        ticks_b = ticks[before_mask]
+        mag_b = mag[before_mask]
+        if len(mag_b) >= 2:
+            moving = mag_b > 0.0
+            transitions = np.where(moving[1:] & (~moving[:-1]))[0] + 1
+            if len(transitions) > 0:
+                start_idx = int(transitions[-1])
+                start_move_tick = int(ticks_b[start_idx])
+
+    if start_move_tick is None:
+        start_move_tick = kt - int(baseline_ticks)
+
+    window_start = int(start_move_tick - int(baseline_ticks))
+    window_end = int(kt + int(post_death_ticks))
+    win_mask = (ticks >= window_start) & (ticks <= window_end)
+    if not win_mask.any():
+        return None
+
+    ticks_w = ticks[win_mask]
+    dx_w = dx[win_mask]
+    dy_w = dy[win_mask]
+    mag_w = mag[win_mask]
+
+    out: dict = {
+        "ticks_rel": (ticks_w - kt).astype(np.int64, copy=False),
+        "ticks_abs": ticks_w.astype(np.int64, copy=False),
+        "kill_tick": kt,
+        "dx": dx_w,
+        "dy": dy_w,
+        "mag": mag_w,
+        "start_move_rel": int(start_move_tick - kt),
+        "pitch": None,
+        "yaw": None,
+    }
+
+    if "pitch" in sub.columns and "yaw" in sub.columns:
+        sub_w = sub.iloc[np.nonzero(win_mask)[0]].sort_values("tick")
+        p = pd.to_numeric(sub_w["pitch"], errors="coerce")
+        y = pd.to_numeric(sub_w["yaw"], errors="coerce")
+        if p.notna().any() and y.notna().any():
+            pitch_arr = p.to_numpy(dtype=np.float64, copy=False)
+            yaw_arr = y.to_numpy(dtype=np.float64, copy=False)
+            # unwrap yaw (deg) so line connections don't jump across ±180
+            yaw_unwrapped = np.degrees(np.unwrap(np.radians(yaw_arr)))
+            out["pitch"] = pitch_arr
+            out["yaw"] = yaw_unwrapped
+
+    return out
+
