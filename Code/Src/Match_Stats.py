@@ -39,25 +39,56 @@ def get_name_from_steamid(df):
 
 
 def _per_kill_cheat_prob(df: pd.DataFrame | None, killer_name: str, kill_tick: int | None) -> float | None:
+    # Backward compatible wrapper: return only the probability.
+    cheat_prob, _ref_tick = per_kill_cheat_prob_and_ref_tick(
+        df, killer_name, kill_tick, score_window_ticks=2, use_last_fire_tick=True
+    )
+    return cheat_prob
+
+
+def per_kill_cheat_prob_and_ref_tick(
+    df: pd.DataFrame | None,
+    killer_name: str,
+    kill_tick: int | None,
+    *,
+    score_window_ticks: int = 2,
+    use_last_fire_tick: bool = True,
+) -> tuple[float | None, int | None]:
     """
-    Return cheat_probability for killer at/near a kill tick.
-    Uses the nearest tick for that player; prefers exact/previous tick when between samples.
+    Compute the cheat probability for a single kill event and the "ref tick"
+    used to compute it.
+
+    By default, this prefers aligning to the last `FIRE` tick at/before the
+    kill tick, since that more closely corresponds to the shot moment for
+    weapons like SSG/Scout.
     """
     if df is None or df.empty:
-        return None
+        return None, None
     if not killer_name or killer_name == "?":
-        return None
+        return None, None
     if "name" not in df.columns or "cheat_probability" not in df.columns:
-        return None
+        return None, None
     if "tick" not in df.columns or kill_tick is None:
-        return None
+        return None, None
 
-    sub = df.loc[df["name"] == killer_name, ["tick", "cheat_probability"]].dropna(subset=["tick", "cheat_probability"])
+    # Pull only what we need. FIRE is optional for robustness.
+    cols = ["tick", "cheat_probability"]
+    fire_col = "FIRE"
+    if use_last_fire_tick and fire_col in df.columns:
+        cols.append(fire_col)
+
+    sub = df.loc[df["name"] == killer_name, cols].dropna(subset=["tick", "cheat_probability"])
     if sub.empty:
-        return None
+        return None, None
 
     ticks = sub["tick"].to_numpy()
     probs = sub["cheat_probability"].to_numpy()
+    fire_vals = None
+    if use_last_fire_tick and fire_col in sub.columns:
+        # FIRE may contain None/NaN or other unexpected values; coerce safely.
+        fire_vals = pd.to_numeric(sub[fire_col], errors="coerce").fillna(0).to_numpy()
+
+    # Coerce/sort by tick so all aligned arrays use the same ordering.
     try:
         ticks_i = ticks.astype(np.int64, copy=False)
     except Exception:
@@ -66,32 +97,53 @@ def _per_kill_cheat_prob(df: pd.DataFrame | None, killer_name: str, kill_tick: i
     order = np.argsort(ticks_i, kind="stable")
     ticks_i = ticks_i[order]
     probs = probs[order]
+    if fire_vals is not None:
+        fire_vals = fire_vals[order]
 
     t = int(kill_tick)
+
+    # 1) Preferred path: last FIRE tick at/before death.
+    if use_last_fire_tick and fire_vals is not None:
+        fire_mask = (fire_vals > 0) & (ticks_i <= t)
+        fire_idxs = np.where(fire_mask)[0]
+        if fire_idxs.size > 0:
+            last_fire_idx = int(fire_idxs[-1])
+            ref_tick = int(ticks_i[last_fire_idx])
+            win_mask = (
+                (ticks_i >= ref_tick - int(score_window_ticks))
+                & (ticks_i <= ref_tick + int(score_window_ticks))
+                & (ticks_i <= t)
+            )
+            win_probs = probs[win_mask]
+            if win_probs.size > 0:
+                p = float(np.median(win_probs))
+                p = p if np.isfinite(p) else None
+                return p, ref_tick
+
+    # 2) Fallback: last tick at/before death.
     idx = int(np.searchsorted(ticks_i, t, side="right") - 1)
     if idx < 0:
         idx = 0
+    ref_tick = int(ticks_i[idx])
 
-    # if the next tick is closer, use it
-    if idx + 1 < len(ticks_i):
-        if abs(int(ticks_i[idx + 1]) - t) < abs(int(ticks_i[idx]) - t):
-            idx = idx + 1
+    win_mask = (ticks_i >= ref_tick - int(score_window_ticks)) & (ticks_i <= ref_tick + int(score_window_ticks))
+    win_probs = probs[win_mask]
+    if win_probs.size == 0:
+        return None, ref_tick
 
-    try:
-        p = float(probs[idx])
-    except Exception:
-        return None
-    return p if np.isfinite(p) else None
+    p = float(np.median(win_probs))
+    p = p if np.isfinite(p) else None
+    return p, ref_tick
 
 
 def calc_killfeed(kills_df, df, results, steamid_to_name):
     if kills_df is None or len(kills_df) == 0:
-        return ["(No kills in this demo)"]
+        return [{"text": "(No kills in this demo)", "meta": {}}]
     att_col = _resolve_col(kills_df, KILL_ATTACKER_COLS)
     vic_col = _resolve_col(kills_df, KILL_VICTIM_COLS)
     weapon_col = "weapon" if "weapon" in kills_df.columns else None
     kill_tick_col = "tick" if "tick" in kills_df.columns else None
-    lines = []
+    items = []
     for _, kill in kills_df.iterrows():
         killer = _name_for(kill.get(att_col), steamid_to_name) if att_col else "?"
         victim = _name_for(kill.get(vic_col), steamid_to_name) if vic_col else "?"
@@ -104,10 +156,22 @@ def calc_killfeed(kills_df, df, results, steamid_to_name):
             except (ValueError, TypeError):
                 kill_tick = None
 
-        cheat_prob = _per_kill_cheat_prob(df, killer, kill_tick)
+        cheat_prob, ref_tick = per_kill_cheat_prob_and_ref_tick(df, killer, kill_tick)
         cheat_str = f" — {cheat_prob * 100:.1f}% cheat" if cheat_prob is not None else ""
-        lines.append(f"[{killer}] -> [{weapon}] -> [{victim}]{cheat_str}")
-    return lines
+        items.append(
+            {
+                "text": f"[{killer}] -> [{weapon}] -> [{victim}]{cheat_str}",
+                "meta": {
+                    "killer_name": killer,
+                    "victim_name": victim,
+                    "weapon": weapon,
+                    "kill_tick": kill_tick,
+                    "score_tick": ref_tick,
+                    "cheat_prob": cheat_prob,
+                },
+            }
+        )
+    return items
 
 
 def calc_scoreboard(df, results, kills_df, hurts_df, num_rounds, steamid_to_name):

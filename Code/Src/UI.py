@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QLabel, QFileDialog, QInputDialog, QListWidget, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QSizePolicy, QMessageBox,
+    QSizePolicy, QMessageBox, QComboBox,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
@@ -26,6 +26,9 @@ win = QMainWindow()
 current_df = None
 current_kills_df = None
 current_steamid_to_name = None
+
+# cached killfeed for filters
+killfeed_all_items: list[dict] = []
 
 # Ribbon / menu bar with File dropdown
 menubar = win.menuBar()
@@ -124,34 +127,73 @@ def run_ingestion_analysis():
     current_kills_df = kills_df
     current_steamid_to_name = steamid_to_name
 
+    # Reset killfeed + filters
     kill_feed_list.clear()
-    lines = calc_killfeed(kills_df, df, results, steamid_to_name)
+    kill_filter_killer.blockSignals(True)
+    kill_filter_weapon.blockSignals(True)
+    kill_filter_killer.clear()
+    kill_filter_weapon.clear()
+    kill_filter_killer.addItem("All")
+    kill_filter_weapon.addItem("All")
+    kill_filter_killer.blockSignals(False)
+    kill_filter_weapon.blockSignals(False)
 
-    # attach tick/killer/victim metadata to each killfeed row (UI-only)
+    # Killfeed should only show kills where the attacker is a real player.
+    # Otherwise you get environment/world/c4-style "kills" polluting the list.
+    kills_df_for_killfeed = kills_df
     att_cols = ["attacker_steamid", "attackerSteamId", "attacker"]
     vic_cols = ["user_steamid", "victimSteamId", "victim", "user"]
-    att_col = next((c for c in att_cols if kills_df is not None and c in kills_df.columns), None)
-    vic_col = next((c for c in vic_cols if kills_df is not None and c in kills_df.columns), None)
-    tick_col = "tick" if kills_df is not None and "tick" in kills_df.columns else None
+    att_col = next(
+        (c for c in att_cols if kills_df_for_killfeed is not None and c in kills_df_for_killfeed.columns),
+        None,
+    )
+    vic_col = next(
+        (c for c in vic_cols if kills_df_for_killfeed is not None and c in kills_df_for_killfeed.columns),
+        None,
+    )
+    if kills_df_for_killfeed is not None and att_col and steamid_to_name:
+        def _is_player_steamid(v) -> bool:
+            # World kills / c4 often arrive as NaN/None or some non-steamid token.
+            if v is None:
+                return False
+            s = str(v)
+            if s.lower() == "nan":
+                return False
+            if s not in steamid_to_name:
+                return False
+            # If the mapping exists but resolves to "?", it's not a real player name.
+            mapped = (steamid_to_name.get(s) or "").strip()
+            return bool(mapped) and mapped != "?"
 
-    kill_rows = list(kills_df.iterrows()) if kills_df is not None else []
-    for i, line in enumerate(lines):
-        kill_feed_list.addItem(line)
-        lw_item = kill_feed_list.item(kill_feed_list.count() - 1)
+        try:
+            mask = kills_df_for_killfeed[att_col].apply(_is_player_steamid)
+            kills_df_for_killfeed = kills_df_for_killfeed.loc[mask].copy()
+        except Exception:
+            # If anything about the column types is unexpected, fall back to unfiltered killfeed.
+            kills_df_for_killfeed = kills_df
 
-        meta = {}
-        if i < len(kill_rows):
-            _, row = kill_rows[i]
-            try:
-                meta["kill_tick"] = int(float(row.get(tick_col))) if tick_col else None
-            except (ValueError, TypeError):
-                meta["kill_tick"] = None
-            if att_col:
-                meta["killer_name"] = steamid_to_name.get(str(row.get(att_col)), str(row.get(att_col)))
-            if vic_col:
-                meta["victim_name"] = steamid_to_name.get(str(row.get(vic_col)), str(row.get(vic_col)))
+    global killfeed_all_items
+    killfeed_all_items = calc_killfeed(kills_df_for_killfeed, df, results, steamid_to_name) or []
 
-        lw_item.setData(Qt.ItemDataRole.UserRole, meta)
+    # Populate filter options from killfeed metadata
+    killers = sorted(
+        {str(it.get("meta", {}).get("killer_name")).strip() for it in killfeed_all_items if it.get("meta", {}).get("killer_name")}
+    )
+    weapons = sorted(
+        {str(it.get("meta", {}).get("weapon")).strip() for it in killfeed_all_items if it.get("meta", {}).get("weapon")}
+    )
+    kill_filter_killer.blockSignals(True)
+    kill_filter_weapon.blockSignals(True)
+    for k in killers:
+        if k and k != "?":
+            kill_filter_killer.addItem(k)
+    for w in weapons:
+        if w and w != "?":
+            kill_filter_weapon.addItem(w)
+    kill_filter_killer.blockSignals(False)
+    kill_filter_weapon.blockSignals(False)
+
+    _apply_killfeed_filter()
 
     rows = calc_scoreboard(df, results, kills_df, hurts_df, num_rounds, steamid_to_name)
     _fill_scoreboard(rows)
@@ -195,17 +237,22 @@ def _parse_cheat_pct_from_killfeed_line(line: str) -> float | None:
 
 
 def on_killfeed_clicked(item):
-    txt = item.text()
-    name = _parse_killer_from_killfeed_line(txt)
+    meta = item.data(Qt.ItemDataRole.UserRole) or {}
+    name = meta.get("killer_name") or None
+    if not name:
+        # Fallback for older/newer killfeed text formats.
+        name = _parse_killer_from_killfeed_line(item.text())
     if not name:
         return
-    cheat_pct = _parse_cheat_pct_from_killfeed_line(txt)
+
+    cheat_prob = meta.get("cheat_prob")
+    cheat_pct = None if cheat_prob is None else float(cheat_prob) * 100.0
     player_view_list.clear()
     for line in build_kill_view_lines(name, cheat_pct):
         player_view_list.addItem(line)
 
-    meta = item.data(Qt.ItemDataRole.UserRole) or {}
-    kill_tick = meta.get("kill_tick")
+    # Plot around the same tick used for the displayed Cheat%.
+    kill_tick = meta.get("score_tick") or meta.get("kill_tick")
     killer_name = meta.get("killer_name") or name
     if FigureCanvas is None or Figure is None:
         return
@@ -232,6 +279,25 @@ def on_open_folder():
         return
     # TODO: scan folder for demos and add to selector
     pass
+
+
+def _apply_killfeed_filter():
+    """Re-render killfeed list based on current filter dropdowns."""
+    kill_feed_list.clear()
+    killer_sel = (kill_filter_killer.currentText() or "").strip()
+    weapon_sel = (kill_filter_weapon.currentText() or "").strip()
+
+    for it in killfeed_all_items:
+        meta = it.get("meta", {}) or {}
+        k = (meta.get("killer_name") or "").strip()
+        w = (meta.get("weapon") or "").strip()
+        if killer_sel and killer_sel != "All" and k != killer_sel:
+            continue
+        if weapon_sel and weapon_sel != "All" and w != weapon_sel:
+            continue
+        kill_feed_list.addItem(it.get("text", ""))
+        lw_item = kill_feed_list.item(kill_feed_list.count() - 1)
+        lw_item.setData(Qt.ItemDataRole.UserRole, meta)
 
 open_action = QAction("&Open Demo...", win)
 open_action.setShortcut("Ctrl+O")
@@ -270,10 +336,35 @@ selector.setAlternatingRowColors(True)
 selector.itemClicked.connect(on_demo_selected)
 left_split.addWidget(selector)
 selector.addItems(list(demo_paths.keys()))
+
+# Killfeed filters (killer + weapon)
+kill_filter_bar = QWidget()
+kill_filter_layout = QHBoxLayout(kill_filter_bar)
+kill_filter_layout.setContentsMargins(6, 4, 6, 4)
+kill_filter_layout.setSpacing(8)
+
+kill_filter_layout.addWidget(QLabel("Killer"))
+kill_filter_killer = QComboBox()
+kill_filter_killer.addItem("All")
+kill_filter_killer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+kill_filter_layout.addWidget(kill_filter_killer, 2)
+
+kill_filter_layout.addWidget(QLabel("Weapon"))
+kill_filter_weapon = QComboBox()
+kill_filter_weapon.addItem("All")
+kill_filter_weapon.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+kill_filter_layout.addWidget(kill_filter_weapon, 2)
+
+left_split.addWidget(kill_filter_bar)
+
 kill_feed_list = QListWidget()
 kill_feed_list.setAlternatingRowColors(True)
 kill_feed_list.itemClicked.connect(on_killfeed_clicked)
 left_split.addWidget(kill_feed_list)
+
+# Re-filter killfeed when dropdowns change
+kill_filter_killer.currentIndexChanged.connect(lambda _i: _apply_killfeed_filter())
+kill_filter_weapon.currentIndexChanged.connect(lambda _i: _apply_killfeed_filter())
 
 right_split = QSplitter(Qt.Orientation.Vertical)
 player_view_list = QListWidget()
