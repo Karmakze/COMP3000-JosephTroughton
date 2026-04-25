@@ -239,74 +239,6 @@ def load_cheater_samples(
     return combined
 
 
-def load_legit_from_cheater_matches(
-    file_list: dict,
-    n_matches: int = 50,
-    samples_per_match: int = 2000,
-    cache_dir: str = "data/cs2cd_cache",
-) -> pd.DataFrame:
-    """
-    Improved labels: sample *non-cheater* players from matches that contain a cheater.
-
-    This reduces shortcut learning (e.g., weapon/meta correlations) because the model
-    sees legit behavior in the same match conditions as cheater-labeled ticks.
-    """
-    print(f"\nLoading {n_matches} legit players from cheater matches...")
-
-    parquet_files = file_list["with_cheater"]["parquet"][:n_matches]
-    json_files = file_list["with_cheater"]["json"][:n_matches]
-
-    cols_to_load = FEATURE_COLS + ["steamid"]
-
-    parquet_bases = {Path(f).stem: f for f in parquet_files}
-    json_bases = {Path(f).stem: f for f in json_files}
-
-    all_samples = []
-    used_matches = 0
-
-    for base in tqdm(list(parquet_bases.keys())[:n_matches], desc="Loading legit-from-cheater matches"):
-        if base not in json_bases:
-            continue
-        parquet_file = parquet_bases[base]
-        json_file = json_bases[base]
-
-        try:
-            json_path = download_file(json_file, cache_dir)
-            cheater_steamids = extract_cheater_steamids(json_path)
-            if not cheater_steamids:
-                continue
-
-            parquet_path = download_file(parquet_file, cache_dir)
-            df = pd.read_parquet(parquet_path, columns=cols_to_load)
-            if "steamid" not in df.columns:
-                continue
-
-            df["steamid"] = df["steamid"].astype(str)
-            non_cheater_df = df[~df["steamid"].isin(cheater_steamids)].copy()
-            del df
-
-            if non_cheater_df.empty:
-                continue
-
-            if len(non_cheater_df) > samples_per_match:
-                non_cheater_df = non_cheater_df.sample(n=samples_per_match, random_state=42)
-
-            non_cheater_df["label"] = 0
-            all_samples.append(non_cheater_df)
-            used_matches += 1
-
-        except Exception as e:
-            print(f"  Error loading {parquet_file}: {e}")
-            continue
-
-    if not all_samples:
-        raise ValueError("No legit samples loaded from cheater matches!")
-
-    combined = pd.concat(all_samples, ignore_index=True)
-    print(f"Loaded {len(combined):,} legit samples from {used_matches} cheater matches")
-    return combined
-
-
 def prepare_features(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, list]:
     # Select available feature columns
     available_cols = [col for col in FEATURE_COLS if col in df.columns]
@@ -486,13 +418,6 @@ def main():
         cache_dir=cache_dir,
     )
     
-    legit_cheater_ctx_df = load_legit_from_cheater_matches(
-        file_list,
-        n_matches=200,
-        samples_per_match=1500,
-        cache_dir=cache_dir,
-    )
-    
     
     cheater_df = load_cheater_samples(
         file_list,
@@ -502,10 +427,10 @@ def main():
     )
     
     print("\nCombining datasets...")
-    df = pd.concat([legit_df, legit_cheater_ctx_df, cheater_df], ignore_index=True)
+    df = pd.concat([legit_df, cheater_df], ignore_index=True)
     
     # Free memory from individual dataframes !IMPORTANT!
-    del legit_df, legit_cheater_ctx_df, cheater_df
+    del legit_df, cheater_df
     gc.collect()
     
     print(f"Total samples: {len(df):,}")

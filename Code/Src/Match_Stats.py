@@ -14,6 +14,8 @@ FORGET_WINDOW_TICKS = int(FORGET_WINDOW_SECONDS * TICK_RATE)
 KILL_ATTACKER_COLS = ["attacker_steamid", "attackerSteamId", "attacker"]
 KILL_VICTIM_COLS = ["user_steamid", "victimSteamId", "victim", "user"]
 HURT_DAMAGE_COLS = ["dmg_health", "damage", "hpDamage", "health_damage"]
+HURT_HITGROUP_COLS = ["hitgroup", "hitGroup", "hit_group", "hitgroupname"]
+HURT_WEAPON_COLS = ["weapon", "weapon_name", "inflictor"]
 
 
 def _resolve_col(df, candidates):
@@ -44,6 +46,116 @@ def _per_kill_cheat_prob(df: pd.DataFrame | None, killer_name: str, kill_tick: i
         df, killer_name, kill_tick, score_window_ticks=2, use_last_fire_tick=True
     )
     return cheat_prob
+
+
+def _headshot_from_kill_row(row) -> bool | None:
+    """Best-effort headshot flag from player_death row."""
+    for col in ("headshot", "m_bHeadshot", "is_headshot", "headshot_kill"):
+        if col not in row:
+            continue
+        v = row.get(col)
+        if pd.isna(v):
+            continue
+        if isinstance(v, (bool, np.bool_)):
+            return bool(v)
+        if isinstance(v, (int, float)) and not pd.isna(v):
+            return bool(int(v))
+        s = str(v).strip().lower()
+        if s in ("true", "1", "yes"):
+            return True
+        if s in ("false", "0", "no"):
+            return False
+    return None
+
+
+def _build_hurt_events_by_pair(hurts_df: pd.DataFrame | None, steamid_to_name: dict) -> dict[tuple[str, str], list[dict]]:
+    """
+    Group player_hurt rows by (killer_name, victim_name) with tick, damage, hitgroup.
+    Each value list is sorted by tick ascending.
+    """
+    if hurts_df is None or len(hurts_df) == 0:
+        return {}
+
+    hurt_att_col = _resolve_col(hurts_df, KILL_ATTACKER_COLS)
+    hurt_vic_col = _resolve_col(hurts_df, KILL_VICTIM_COLS)
+    hurt_tick_col = "tick" if "tick" in hurts_df.columns else None
+    damage_col = _resolve_col(hurts_df, HURT_DAMAGE_COLS)
+    hitgroup_col = _resolve_col(hurts_df, HURT_HITGROUP_COLS)
+    weapon_col = _resolve_col(hurts_df, HURT_WEAPON_COLS)
+
+    if not hurt_att_col or not hurt_vic_col or not hurt_tick_col or not damage_col:
+        return {}
+
+    out: dict[tuple[str, str], list[dict]] = {}
+    for _, row in hurts_df.iterrows():
+        killer = _name_for(row.get(hurt_att_col), steamid_to_name)
+        victim = _name_for(row.get(hurt_vic_col), steamid_to_name)
+        if killer == "?" or victim == "?":
+            continue
+        t = row.get(hurt_tick_col)
+        if pd.isna(t):
+            continue
+        try:
+            tick_val = int(float(t))
+        except (ValueError, TypeError):
+            continue
+        dmg = row.get(damage_col)
+        try:
+            dmg_int = int(float(dmg)) if pd.notna(dmg) else None
+        except (ValueError, TypeError):
+            dmg_int = None
+        hg = None
+        if hitgroup_col:
+            hg_raw = row.get(hitgroup_col)
+            if pd.notna(hg_raw):
+                hg = str(hg_raw).strip() or None
+        wpn = None
+        if weapon_col:
+            w_raw = row.get(weapon_col)
+            if pd.notna(w_raw):
+                wpn = str(w_raw).strip() or None
+        key = (killer, victim)
+        out.setdefault(key, []).append(
+            {"tick": tick_val, "damage": dmg_int, "hitgroup": hg, "weapon": wpn}
+        )
+
+    for key in out:
+        out[key].sort(key=lambda e: e["tick"])
+    return out
+
+
+def per_kill_ttd_and_killing_hit(
+    killer_name: str,
+    victim_name: str,
+    death_tick: int | None,
+    hurt_events_by_pair: dict[tuple[str, str], list[dict]],
+) -> tuple[float | None, dict | None]:
+    """
+    TTD (ms): first damage in the 4s forget window before death, to death tick.
+    Killing hit: last hurt event from killer to victim at or before death_tick.
+    """
+    if death_tick is None or not killer_name or not victim_name:
+        return None, None
+    if killer_name == "?" or victim_name == "?":
+        return None, None
+
+    key = (killer_name, victim_name)
+    events = [e for e in hurt_events_by_pair.get(key, []) if e["tick"] <= int(death_tick)]
+    if not events:
+        return None, None
+
+    ticks_only = [e["tick"] for e in events]
+    D = int(death_tick)
+    engagement_start = D
+    for t in reversed(ticks_only):
+        if engagement_start - t <= FORGET_WINDOW_TICKS:
+            engagement_start = t
+        else:
+            break
+    ttd_ms = (D - engagement_start) / TICK_RATE * 1000.0
+
+    killing = events[-1]
+    return float(ttd_ms), killing
 
 
 def per_kill_cheat_prob_and_ref_tick(
@@ -136,13 +248,14 @@ def per_kill_cheat_prob_and_ref_tick(
     return p, ref_tick
 
 
-def calc_killfeed(kills_df, df, results, steamid_to_name):
+def calc_killfeed(kills_df, df, results, steamid_to_name, hurts_df: pd.DataFrame | None = None):
     if kills_df is None or len(kills_df) == 0:
         return [{"text": "(No kills in this demo)", "meta": {}}]
     att_col = _resolve_col(kills_df, KILL_ATTACKER_COLS)
     vic_col = _resolve_col(kills_df, KILL_VICTIM_COLS)
     weapon_col = "weapon" if "weapon" in kills_df.columns else None
     kill_tick_col = "tick" if "tick" in kills_df.columns else None
+    hurt_events_by_pair = _build_hurt_events_by_pair(hurts_df, steamid_to_name)
     items = []
     for _, kill in kills_df.iterrows():
         killer = _name_for(kill.get(att_col), steamid_to_name) if att_col else "?"
@@ -158,6 +271,21 @@ def calc_killfeed(kills_df, df, results, steamid_to_name):
 
         cheat_prob, ref_tick = per_kill_cheat_prob_and_ref_tick(df, killer, kill_tick)
         cheat_str = f" — {cheat_prob * 100:.1f}% cheat" if cheat_prob is not None else ""
+
+        hs = _headshot_from_kill_row(kill)
+        ttd_ms, killing = per_kill_ttd_and_killing_hit(killer, victim, kill_tick, hurt_events_by_pair)
+        killing_line = None
+        if killing is not None:
+            parts = []
+            if killing.get("damage") is not None:
+                parts.append(f"{killing['damage']} dmg")
+            if killing.get("hitgroup"):
+                parts.append(killing["hitgroup"])
+            if killing.get("weapon"):
+                parts.append(str(killing["weapon"]))
+            parts.append(f"tick {killing.get('tick')}")
+            killing_line = " · ".join(parts) if parts else None
+
         items.append(
             {
                 "text": f"[{killer}] -> [{weapon}] -> [{victim}]{cheat_str}",
@@ -168,6 +296,10 @@ def calc_killfeed(kills_df, df, results, steamid_to_name):
                     "kill_tick": kill_tick,
                     "score_tick": ref_tick,
                     "cheat_prob": cheat_prob,
+                    "ttd_ms": ttd_ms,
+                    "headshot": hs,
+                    "killing_hit": killing,
+                    "killing_hit_line": killing_line,
                 },
             }
         )

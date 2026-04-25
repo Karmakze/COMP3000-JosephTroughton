@@ -16,16 +16,45 @@ def build_player_view_lines(player_name: str) -> list[str]:
     return [f"Name: {name}"]
 
 
-def build_kill_view_lines(killer_name: str, cheat_pct: float | None) -> list[str]:
+def build_kill_view_lines(
+    killer_name: str,
+    cheat_pct: float | None,
+    kill_meta: dict | None = None,
+) -> list[str]:
     """
     Non-UI helper for populating the top-right list when a specific kill is selected.
+
+    kill_meta may include: ttd_ms, headshot (bool|None), killing_hit_line (str|None).
     """
     name = (killer_name or "").strip()
     if not name:
         return []
-    if cheat_pct is None:
-        return [f"Name: {name}"]
-    return [f"Name: {name}", f"Cheat Chance: {cheat_pct:.1f}%"]
+    lines = [f"Name: {name}"]
+    if cheat_pct is not None:
+        lines.append(f"Cheat Chance: {cheat_pct:.1f}%")
+
+    if kill_meta:
+        ttd = kill_meta.get("ttd_ms")
+        if ttd is not None and isinstance(ttd, (int, float)) and np.isfinite(ttd):
+            lines.append(f"TTD (this kill): {float(ttd):.0f} ms")
+        else:
+            lines.append("TTD (this kill): —")
+
+        hs = kill_meta.get("headshot")
+        if hs is True:
+            lines.append("Headshot: yes")
+        elif hs is False:
+            lines.append("Headshot: no")
+        else:
+            lines.append("Headshot: —")
+
+        kh = kill_meta.get("killing_hit_line")
+        if kh:
+            lines.append(f"Killing hit: {kh}")
+        else:
+            lines.append("Killing hit: —")
+
+    return lines
 
 
 def compute_kill_mouse_window(

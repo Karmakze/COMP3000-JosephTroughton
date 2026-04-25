@@ -173,7 +173,9 @@ def run_ingestion_analysis():
             kills_df_for_killfeed = kills_df
 
     global killfeed_all_items
-    killfeed_all_items = calc_killfeed(kills_df_for_killfeed, df, results, steamid_to_name) or []
+    killfeed_all_items = calc_killfeed(
+        kills_df_for_killfeed, df, results, steamid_to_name, hurts_df
+    ) or []
 
     # Populate filter options from killfeed metadata
     killers = sorted(
@@ -248,7 +250,7 @@ def on_killfeed_clicked(item):
     cheat_prob = meta.get("cheat_prob")
     cheat_pct = None if cheat_prob is None else float(cheat_prob) * 100.0
     player_view_list.clear()
-    for line in build_kill_view_lines(name, cheat_pct):
+    for line in build_kill_view_lines(name, cheat_pct, meta):
         player_view_list.addItem(line)
 
     # Plot around the same tick used for the displayed Cheat%.
