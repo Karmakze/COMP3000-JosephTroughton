@@ -60,6 +60,14 @@ def _get_int(name: str, default: int, *, low: int | None = None, high: int | Non
     return val
 
 
+def _get_str(name: str, default: str = "") -> str:
+    _load_env_file_once()
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip()
+
+
 # Ingestion/model inference
 INGEST_THRESHOLD_DEFAULT = _get_float("CS2CD_INGEST_THRESHOLD", 0.5, low=0.0, high=1.0)
 
@@ -73,3 +81,6 @@ FORGET_WINDOW_SECONDS_DEFAULT = _get_float("CS2CD_FORGET_WINDOW_SECONDS", 4.0, l
 KILL_WINDOW_BASELINE_TICKS_DEFAULT = _get_int("CS2CD_KILL_WINDOW_BASELINE_TICKS", 20, low=1)
 KILL_WINDOW_POST_DEATH_TICKS_DEFAULT = _get_int("CS2CD_KILL_WINDOW_POST_DEATH_TICKS", 20, low=0)
 KILL_WINDOW_SEARCH_BACK_TICKS_DEFAULT = _get_int("CS2CD_KILL_WINDOW_SEARCH_BACK_TICKS", 256, low=1)
+
+# File dialog defaults
+DEFAULT_DEMO_DIR = _get_str("CS2CD_DEFAULT_DEMO_DIR", "")

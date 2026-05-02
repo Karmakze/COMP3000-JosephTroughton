@@ -21,15 +21,37 @@ def build_player_view_lines(player_name: str) -> list[str]:
     return [f"Name: {name}"]
 
 
+def _format_demo_mmss_span(ticks_abs: np.ndarray, tick_rate: float = 128.0) -> str | None:
+    """Absolute demo clock from tick count: m:ss … m:ss (same tick rate as gameplay)."""
+    if ticks_abs is None or getattr(ticks_abs, "size", 0) == 0:
+        return None
+    t = np.asarray(ticks_abs, dtype=float)
+    s0 = float(np.nanmin(t)) / float(tick_rate)
+    s1 = float(np.nanmax(t)) / float(tick_rate)
+
+    def fmt(sec: float) -> str:
+        if not np.isfinite(sec):
+            return "?"
+        w = int(round(max(0.0, sec)))
+        m, ss = divmod(w, 60)
+        return f"{m}:{ss:02d}"
+
+    return f"{fmt(s0)} … {fmt(s1)}"
+
+
 def build_kill_view_lines(
     killer_name: str,
     cheat_pct: float | None,
     kill_meta: dict | None = None,
+    *,
+    ticks_abs: np.ndarray | None = None,
+    tick_rate: float = 128.0,
 ) -> list[str]:
     """
     Non-UI helper for populating the top-right list when a specific kill is selected.
 
     kill_meta may include: ttd_ms, headshot (bool|None), killing_hit_line (str|None).
+    ticks_abs: absolute demo ticks included in the mouse plot (min/max shown as m:ss … m:ss).
     """
     name = (killer_name or "").strip()
     if not name:
@@ -37,6 +59,9 @@ def build_kill_view_lines(
     lines = [f"Name: {name}"]
     if cheat_pct is not None:
         lines.append(f"Cheat Chance: {cheat_pct:.1f}%")
+    span = _format_demo_mmss_span(ticks_abs, tick_rate=tick_rate) if ticks_abs is not None else None
+    if span:
+        lines.append(f"Plot window (demo time): {span}")
 
     if kill_meta:
         ttd = kill_meta.get("ttd_ms")

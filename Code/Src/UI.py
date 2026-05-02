@@ -7,22 +7,36 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QSizePolicy, QMessageBox, QComboBox,
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QAction, QDesktopServices
 from DemoParse2_Ingestion import run_ingestion
 from Match_Stats import get_name_from_steamid, calc_killfeed, calc_scoreboard
 from Player_View import build_player_view_lines, build_kill_view_lines, compute_kill_mouse_window
 from app_config import (
+    DEFAULT_DEMO_DIR,
     KILL_WINDOW_BASELINE_TICKS_DEFAULT,
     KILL_WINDOW_POST_DEATH_TICKS_DEFAULT,
 )
 
+
+def _qt_demo_start_dir() -> str:
+    """Directory for file dialogs; from CS2CD_DEFAULT_DEMO_DIR when set and valid."""
+    if not (DEFAULT_DEMO_DIR or "").strip():
+        return ""
+    p = Path(DEFAULT_DEMO_DIR.strip()).expanduser()
+    return str(p.resolve()) if p.is_dir() else ""
+
 try:
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    from matplotlib.collections import LineCollection
 except Exception:  # matplotlib optional at runtime
     Figure = None
     FigureCanvas = None
+    LinearSegmentedColormap = None
+    Normalize = None
+    LineCollection = None
 app = QApplication([])
 win = QMainWindow()
 
@@ -47,7 +61,12 @@ demo_paths = {
 } # TEMP PATHs
 
 def on_open_demo():
-    path, _ = QFileDialog.getOpenFileName(win, "Open Demo", "", "Demo files (*.dem *.dem.gz)")
+    path, _ = QFileDialog.getOpenFileName(
+        win,
+        "Open Demo",
+        _qt_demo_start_dir(),
+        "Demo files (*.dem *.dem.gz)",
+    )
     if not path:
         return
     # df, results = run_ingestion(path)
@@ -253,25 +272,27 @@ def on_killfeed_clicked(item):
 
     cheat_prob = meta.get("cheat_prob")
     cheat_pct = None if cheat_prob is None else float(cheat_prob) * 100.0
-    player_view_list.clear()
-    for line in build_kill_view_lines(name, cheat_pct, meta):
-        player_view_list.addItem(line)
-
-    # Plot around the same tick used for the displayed Cheat%.
+    # Same ref tick as cheat % + mouse plot (last FIRE at/before kill when available).
     kill_tick = meta.get("score_tick") or meta.get("kill_tick")
     killer_name = meta.get("killer_name") or name
+
+    data = None
+    if current_df is not None and kill_tick is not None:
+        data = compute_kill_mouse_window(
+            current_df,
+            killer_name,
+            kill_tick,
+            baseline_ticks=KILL_WINDOW_BASELINE_TICKS_DEFAULT,
+            post_death_ticks=KILL_WINDOW_POST_DEATH_TICKS_DEFAULT,
+        )
+
+    player_view_list.clear()
+    ticks_abs = data.get("ticks_abs") if data else None
+    for line in build_kill_view_lines(name, cheat_pct, meta, ticks_abs=ticks_abs):
+        player_view_list.addItem(line)
+
     if FigureCanvas is None or Figure is None:
         return
-    if current_df is None or kill_tick is None:
-        return
-
-    data = compute_kill_mouse_window(
-        current_df,
-        killer_name,
-        kill_tick,
-        baseline_ticks=KILL_WINDOW_BASELINE_TICKS_DEFAULT,
-        post_death_ticks=KILL_WINDOW_POST_DEATH_TICKS_DEFAULT,
-    )
     if not data:
         return
     _plot_kill_mouse(data)
@@ -286,11 +307,21 @@ def on_scoreboard_clicked(row, _col):
         _set_player_view(name)
 
 def on_open_folder():
-    path = QFileDialog.getExistingDirectory(win, "Open Demo Folder")
+    """Open CS2CD_DEFAULT_DEMO_DIR in the OS default file manager (no picker)."""
+    path = _qt_demo_start_dir()
     if not path:
+        QMessageBox.information(
+            win,
+            "Demo folder",
+            "Set CS2CD_DEFAULT_DEMO_DIR in Code/.env to an existing folder, then try again.",
+        )
         return
-    # TODO: scan folder for demos and add to selector
-    pass
+    if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+        QMessageBox.warning(
+            win,
+            "Demo folder",
+            f"Could not open this path in the file manager:\n\n{path}",
+        )
 
 
 def _apply_killfeed_filter():
@@ -316,7 +347,7 @@ open_action.setShortcut("Ctrl+O")
 open_action.triggered.connect(on_open_demo)
 file_menu.addAction(open_action)
 
-open_folder_action = QAction("Open &Folder...", win)
+open_folder_action = QAction("Open Demo &Folder", win)
 open_folder_action.setShortcut("Ctrl+Shift+O")
 open_folder_action.triggered.connect(on_open_folder)
 file_menu.addAction(open_folder_action)
@@ -395,7 +426,8 @@ if FigureCanvas is not None and Figure is not None:
     ax_aim.set_title("Aim trace (yaw vs pitch)")
     ax_aim.set_xlabel("yaw (°)")
     ax_aim.set_ylabel("pitch (°)")
-    fig.tight_layout()
+    # Keep a stable subplot layout to avoid jitter/shrinking on redraw.
+    fig.subplots_adjust(left=0.07, right=0.93, bottom=0.16, top=0.90, wspace=0.30)
     right_split.addWidget(canvas)
 else:
     canvas = None
@@ -417,6 +449,11 @@ def _index_at_kill_tick(ticks_abs, kill_tick: int) -> int | None:
 def _plot_kill_mouse(data: dict):
     if canvas is None or ax_mouse_time is None or ax_aim is None:
         return
+    # Remove any previously-added colorbar axes from prior draws.
+    fig = canvas.figure
+    for extra_ax in list(fig.axes):
+        if extra_ax not in (ax_mouse_time, ax_aim):
+            fig.delaxes(extra_ax)
     ax_mouse_time.clear()
     ax_aim.clear()
 
@@ -437,9 +474,47 @@ def _plot_kill_mouse(data: dict):
     yaw = data.get("yaw")
     pitch = data.get("pitch")
     if yaw is not None and pitch is not None and len(yaw) == len(pitch) and len(yaw) > 0:
-        ax_aim.plot(yaw, pitch, "-", color="C3", linewidth=1.2, alpha=0.85, zorder=1)
-        c_aim = ticks_rel if len(ticks_rel) == len(yaw) else np.arange(len(yaw))
-        ax_aim.scatter(yaw, pitch, s=8, c=c_aim, cmap="plasma", zorder=2, alpha=0.7)
+        if (
+            len(mag) == len(yaw)
+            and LinearSegmentedColormap is not None
+            and Normalize is not None
+            and LineCollection is not None
+            and len(yaw) >= 2
+        ):
+            # Green -> orange -> red speed map (slow -> fast), applied to line segments.
+            speed_cmap = LinearSegmentedColormap.from_list(
+                "aim_speed",
+                ["#2ca02c", "#ff7f0e", "#d62728"],
+            )
+            m_min = float(np.nanmin(mag)) if len(mag) else 0.0
+            m_max = float(np.nanmax(mag)) if len(mag) else 1.0
+            if not np.isfinite(m_min):
+                m_min = 0.0
+            if not np.isfinite(m_max) or m_max <= m_min:
+                m_max = m_min + 1.0
+            norm = Normalize(vmin=m_min, vmax=m_max)
+
+            # Build line segments between consecutive points.
+            pts = np.column_stack((np.asarray(yaw, dtype=float), np.asarray(pitch, dtype=float)))
+            segs = np.stack([pts[:-1], pts[1:]], axis=1)
+            seg_speed = 0.5 * (np.asarray(mag[:-1], dtype=float) + np.asarray(mag[1:], dtype=float))
+
+            lc = LineCollection(segs, cmap=speed_cmap, norm=norm, linewidths=1.8, alpha=0.9, zorder=1)
+            lc.set_array(seg_speed)
+            ax_aim.add_collection(lc)
+
+            # Keep dots fixed color as requested.
+            ax_aim.scatter(yaw, pitch, s=10, c="C3", zorder=2, alpha=0.9)
+
+            # Draw colorbar in an inset axis so the main aim axis size stays fixed.
+            cax = ax_aim.inset_axes([1.02, 0.10, 0.03, 0.80])
+            cbar = fig.colorbar(lc, cax=cax)
+            cbar.set_label("Mouse speed |Δ mouse|", fontsize=8)
+            cbar.ax.tick_params(labelsize=7)
+        else:
+            # Fallback: fixed-color line and points.
+            ax_aim.plot(yaw, pitch, "-", color="C3", linewidth=1.4, alpha=0.85, zorder=1)
+            ax_aim.scatter(yaw, pitch, s=10, c="C3", zorder=2, alpha=0.9)
         if kill_idx is not None and kill_idx < len(yaw):
             ax_aim.scatter(
                 [yaw[kill_idx]],
@@ -468,8 +543,6 @@ def _plot_kill_mouse(data: dict):
         ax_aim.set_title("Aim trace (yaw vs pitch)")
     ax_aim.grid(True, alpha=0.25)
 
-    fig = canvas.figure
-    fig.tight_layout()
     canvas.draw()
 
 scoreboard = QTableWidget()
