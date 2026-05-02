@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from app_config import (
+    KILL_WINDOW_BASELINE_TICKS_DEFAULT,
+    KILL_WINDOW_POST_DEATH_TICKS_DEFAULT,
+    KILL_WINDOW_SEARCH_BACK_TICKS_DEFAULT,
+)
 
 
 def build_player_view_lines(player_name: str) -> list[str]:
@@ -61,9 +66,9 @@ def compute_kill_mouse_window(
     df: pd.DataFrame | None,
     killer_name: str,
     kill_tick: int | None,
-    baseline_ticks: int = 20,
-    post_death_ticks: int = 20,
-    search_back_ticks: int = 256,
+    baseline_ticks: int = KILL_WINDOW_BASELINE_TICKS_DEFAULT,
+    post_death_ticks: int = KILL_WINDOW_POST_DEATH_TICKS_DEFAULT,
+    search_back_ticks: int = KILL_WINDOW_SEARCH_BACK_TICKS_DEFAULT,
 ) -> dict | None:
     """
     Pure (non-UI) kill analysis.

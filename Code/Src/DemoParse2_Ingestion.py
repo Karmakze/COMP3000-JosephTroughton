@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 from joblib import load
 from demoparser2 import DemoParser
+from app_config import INGEST_THRESHOLD_DEFAULT
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -147,7 +148,7 @@ def prepare_features(df: pd.DataFrame, feature_names: list) -> np.ndarray:
 def analyze_player(
     player_name: str,
     player_probs: np.ndarray,
-    threshold: float = 0.5,
+    threshold: float = INGEST_THRESHOLD_DEFAULT,
 ) -> dict:
     return {
         "name": player_name,
@@ -161,7 +162,7 @@ def analyze_player(
     }
 
 
-def run_ingestion(demo_path: str, threshold: float = 0.5):
+def run_ingestion(demo_path: str, threshold: float = INGEST_THRESHOLD_DEFAULT):
     demo_path = Path(demo_path)
     
     # Load model
@@ -221,8 +222,8 @@ def main():
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
-        help="Probability threshold for flagging suspicious behavior (default: 0.5)"
+        default=INGEST_THRESHOLD_DEFAULT,
+        help=f"Probability threshold for flagging suspicious behavior (default: {INGEST_THRESHOLD_DEFAULT})"
     )
     parser.add_argument(
         "--output",

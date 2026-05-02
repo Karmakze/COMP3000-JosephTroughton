@@ -4,10 +4,14 @@ Pure calculation helpers for demo stats. No UI dependencies.
 
 import numpy as np
 import pandas as pd
+from app_config import (
+    FORGET_WINDOW_SECONDS_DEFAULT,
+    KILL_SCORE_WINDOW_TICKS_DEFAULT,
+)
 
 # Demo tick rate and engagement forget window
 TICK_RATE = 128
-FORGET_WINDOW_SECONDS = 4
+FORGET_WINDOW_SECONDS = FORGET_WINDOW_SECONDS_DEFAULT
 FORGET_WINDOW_TICKS = int(FORGET_WINDOW_SECONDS * TICK_RATE)
 
 # Column name candidates for demoparser2 event tables
@@ -43,7 +47,11 @@ def get_name_from_steamid(df):
 def _per_kill_cheat_prob(df: pd.DataFrame | None, killer_name: str, kill_tick: int | None) -> float | None:
     # Backward compatible wrapper: return only the probability.
     cheat_prob, _ref_tick = per_kill_cheat_prob_and_ref_tick(
-        df, killer_name, kill_tick, score_window_ticks=2, use_last_fire_tick=True
+        df,
+        killer_name,
+        kill_tick,
+        score_window_ticks=KILL_SCORE_WINDOW_TICKS_DEFAULT,
+        use_last_fire_tick=True,
     )
     return cheat_prob
 
@@ -163,7 +171,7 @@ def per_kill_cheat_prob_and_ref_tick(
     killer_name: str,
     kill_tick: int | None,
     *,
-    score_window_ticks: int = 2,
+    score_window_ticks: int = KILL_SCORE_WINDOW_TICKS_DEFAULT,
     use_last_fire_tick: bool = True,
 ) -> tuple[float | None, int | None]:
     """

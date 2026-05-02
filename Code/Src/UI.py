@@ -12,6 +12,10 @@ from PyQt6.QtGui import QAction
 from DemoParse2_Ingestion import run_ingestion
 from Match_Stats import get_name_from_steamid, calc_killfeed, calc_scoreboard
 from Player_View import build_player_view_lines, build_kill_view_lines, compute_kill_mouse_window
+from app_config import (
+    KILL_WINDOW_BASELINE_TICKS_DEFAULT,
+    KILL_WINDOW_POST_DEATH_TICKS_DEFAULT,
+)
 
 try:
     from matplotlib.figure import Figure
@@ -261,7 +265,13 @@ def on_killfeed_clicked(item):
     if current_df is None or kill_tick is None:
         return
 
-    data = compute_kill_mouse_window(current_df, killer_name, kill_tick, baseline_ticks=20, post_death_ticks=20)
+    data = compute_kill_mouse_window(
+        current_df,
+        killer_name,
+        kill_tick,
+        baseline_ticks=KILL_WINDOW_BASELINE_TICKS_DEFAULT,
+        post_death_ticks=KILL_WINDOW_POST_DEATH_TICKS_DEFAULT,
+    )
     if not data:
         return
     _plot_kill_mouse(data)
