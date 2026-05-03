@@ -1,3 +1,4 @@
+import json
 import numpy as np
 from pathlib import Path
 
@@ -5,18 +6,48 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QLabel, QFileDialog, QInputDialog, QListWidget, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QSizePolicy, QMessageBox, QComboBox,
+    QSizePolicy, QMessageBox, QComboBox, QProgressDialog,
 )
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import QObject, QThread, QTimer, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QDesktopServices
 from DemoParse2_Ingestion import run_ingestion
 from Match_Stats import get_name_from_steamid, calc_killfeed, calc_scoreboard
 from Player_View import build_player_view_lines, build_kill_view_lines, compute_kill_mouse_window
 from app_config import (
+    BASE_DIR,
     DEFAULT_DEMO_DIR,
     KILL_WINDOW_BASELINE_TICKS_DEFAULT,
     KILL_WINDOW_POST_DEATH_TICKS_DEFAULT,
 )
+
+# Persists list name -> .dem path between sessions (updated when a demo is added).
+SAVED_DEMOS_JSON = BASE_DIR / "data" / "saved_demos.json"
+
+
+def _load_saved_demo_paths() -> dict[str, str]:
+    if not SAVED_DEMOS_JSON.is_file():
+        return {}
+    try:
+        raw = json.loads(SAVED_DEMOS_JSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, str) and k.strip():
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _persist_demo_paths() -> None:
+    try:
+        SAVED_DEMOS_JSON.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SAVED_DEMOS_JSON.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(demo_paths, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(SAVED_DEMOS_JSON)
+    except OSError:
+        pass
 
 
 def _qt_demo_start_dir() -> str:
@@ -37,13 +68,177 @@ except Exception:  # matplotlib optional at runtime
     LinearSegmentedColormap = None
     Normalize = None
     LineCollection = None
+
+
+# Same pattern as QFileDialog filter below — single definition of “demo extension”.
+def _is_demo_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    pl = path.name.lower()
+    return pl.endswith(".dem") or pl.endswith(".dem.gz")
+
+
+DEMO_OPEN_FILE_FILTER = "Demo files (*.dem *.dem.gz)"
+
+
+def _paths_from_mime_urls(mime) -> list[str]:
+    if mime is None or not mime.hasUrls():
+        return []
+    return [u.toLocalFile() for u in mime.urls() if u.toLocalFile()]
+
+
+def _mime_has_demo_urls(mime) -> bool:
+    return any(_is_demo_file(Path(p)) for p in _paths_from_mime_urls(mime))
+
+
+class _IngestionWorker(QObject):
+    """Runs run_ingestion in a background thread so the UI stays responsive."""
+
+    # Do not pass huge pandas objects through signals — Qt may freeze copying them for the queue.
+    finished = pyqtSignal()
+    failed = pyqtSignal(str, str)  # title, message
+
+    def __init__(self, demo_path: str):
+        super().__init__()
+        self._demo_path = demo_path
+        self._payload: tuple | None = None
+
+    def run_ingest(self) -> None:
+        try:
+            self._payload = run_ingestion(self._demo_path)
+            self.finished.emit()
+        except FileNotFoundError as e:
+            self._payload = None
+            self.failed.emit("Demo not found", str(e))
+        except OSError as e:
+            self._payload = None
+            self.failed.emit("Could not read demo", str(e))
+        except Exception as e:
+            self._payload = None
+            self.failed.emit("Could not load demo", f"{type(e).__name__}: {e}")
+
+
 app = QApplication([])
-win = QMainWindow()
+
+# Display name -> absolute path (loaded from data/saved_demos.json on startup).
+demo_paths = _load_saved_demo_paths()
+
+# Filled when the demo QListWidget is constructed (drag-drop may run after UI build).
+_ui_main: dict = {"demo_selector": None}
+
+
+def _unique_demo_list_key(base: str) -> str:
+    base = (base or "").strip() or "demo"
+    if base not in demo_paths:
+        return base
+    n = 2
+    while f"{base} ({n})" in demo_paths:
+        n += 1
+    return f"{base} ({n})"
+
+
+def _default_demo_label(p: Path) -> str:
+    pl = p.name.lower()
+    if pl.endswith(".dem.gz"):
+        return p.name[:-7]
+    return p.stem
+
+
+def _register_demo_file(path_str: str, *, label: str | None = None) -> bool:
+    """Append one demo file to the selector list and demo_paths."""
+    sel = _ui_main.get("demo_selector")
+    if sel is None:
+        return False
+    p = Path(path_str).expanduser().resolve()
+    if not _is_demo_file(p):
+        return False
+    key_base = label.strip() if label else _default_demo_label(p)
+    name = _unique_demo_list_key(key_base)
+    demo_paths[name] = str(p)
+    sel.addItem(name)
+    _persist_demo_paths()
+    return True
+
+
+def _prompt_demo_display_name(path_str: str) -> str | None:
+    """Ask list name; default text is the file name (with extension). Returns None if cancelled or empty."""
+    p = Path(path_str).expanduser().resolve()
+    default = p.name
+    name, ok = QInputDialog.getText(win, "Enter Name of Demo", "Name:", text=default)
+    if not ok:
+        return None
+    name = (name or "").strip()
+    if not name:
+        return None
+    return name
+
+
+class MainWindow(QMainWindow):
+    """Main window with drag-and-drop for .dem / .dem.gz files."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if _mime_has_demo_urls(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if _mime_has_demo_urls(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        mime = event.mimeData()
+        paths = _paths_from_mime_urls(mime)
+        if not paths:
+            event.ignore()
+            return
+        demo_paths_only = [raw for raw in paths if _is_demo_file(Path(raw).expanduser().resolve())]
+        if not demo_paths_only:
+            event.ignore()
+            QMessageBox.information(
+                self,
+                "Drag and drop",
+                "No supported demo files here. Drop a .dem or .dem.gz file.",
+            )
+            return
+        added = 0
+        for raw in demo_paths_only:
+            label = _prompt_demo_display_name(raw)
+            if label is None:
+                continue
+            if _register_demo_file(raw, label=label):
+                added += 1
+        if added:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
+win = MainWindow()
+
+
+def _browse_single_demo_path() -> str | None:
+    """Open demo file picker (shared filter/dir with File → Open Demo)."""
+    path, _ = QFileDialog.getOpenFileName(
+        win,
+        "Open Demo",
+        _qt_demo_start_dir(),
+        DEMO_OPEN_FILE_FILTER,
+    )
+    return path or None
+
 
 # cached current demo data for click handlers
 current_df = None
 current_kills_df = None
 current_steamid_to_name = None
+current_loaded_demo_name: str | None = None
 
 # cached killfeed for filters
 killfeed_all_items: list[dict] = []
@@ -52,33 +247,14 @@ killfeed_all_items: list[dict] = []
 menubar = win.menuBar()
 file_menu = menubar.addMenu("&File")
 
-# Store demo paths mapped to their display names need to be cached in file in future 
-demo_paths = {
-    "Demo 1": "/home/karmakaze/Git/Single Demos/Pro/iem-krakw-2026-faze-vs-bcgame/faze-vs-bc-game-m3-ancient.dem",
-    "Demo 2": "/home/karmakaze/Git/Single Demos/Pro/iem-krakw-2026-faze-vs-bcgame/faze-vs-bc-game-m2-nuke.dem",
-    "Demo 3": "/home/karmakaze/Git/Single Demos/Pro/iem-krakw-2026-faze-vs-bcgame/faze-vs-bc-game-m1-dust2.dem",
-
-} # TEMP PATHs
-
 def on_open_demo():
-    path, _ = QFileDialog.getOpenFileName(
-        win,
-        "Open Demo",
-        _qt_demo_start_dir(),
-        "Demo files (*.dem *.dem.gz)",
-    )
+    path = _browse_single_demo_path()
     if not path:
         return
-    # df, results = run_ingestion(path)
-    # print(df)
-    # print(results)
-    # Prompt Name of Demo
-    name, ok = QInputDialog.getText(win, "Enter Name of Demo", "Name:")
-    if not name or not ok:
+    label = _prompt_demo_display_name(path)
+    if label is None:
         return
-    # Add to selector
-    selector.addItem(name)
-    demo_paths[name] = path
+    _register_demo_file(path, label=label)
 
 def _fill_scoreboard(rows):
     scoreboard.setRowCount(0)
@@ -107,44 +283,11 @@ def on_demo_selected(item):
     # Update UI with demo data
 
 
-def run_ingestion_analysis():
-    item = selector.currentItem()
-    if item is None:
-        return
+def _apply_ingestion_result(demo_name: str, df, results, kills_df, hurts_df, num_rounds) -> None:
+    """Apply parsed demo + model output to the UI (main thread only)."""
+    global current_df, current_kills_df, current_steamid_to_name, killfeed_all_items
+    global current_loaded_demo_name
 
-    demo_name = item.text()
-    path = demo_paths.get(demo_name)
-    if not path:
-        return
-
-    demo_file = Path(path).expanduser()
-    if not demo_file.is_file():
-        QMessageBox.warning(
-            win,
-            "Demo not found",
-            f"No file at path for “{demo_name}”:\n\n{demo_file}\n\n"
-            "It may have been moved or renamed. Use File → Open Demo and add it again, "
-            "or fix the path in your demo list.",
-        )
-        return
-
-    global current_df, current_kills_df, current_steamid_to_name
-    try:
-        df, results, kills_df, hurts_df, num_rounds = run_ingestion(str(demo_file))
-    except FileNotFoundError as e:
-        QMessageBox.warning(
-            win,
-            "Demo not found",
-            str(e),
-        )
-        return
-    except OSError as e:
-        QMessageBox.critical(
-            win,
-            "Could not read demo",
-            str(e),
-        )
-        return
     steamid_to_name = get_name_from_steamid(df)
     current_df = df
     current_kills_df = kills_df
@@ -195,7 +338,6 @@ def run_ingestion_analysis():
             # If anything about the column types is unexpected, fall back to unfiltered killfeed.
             kills_df_for_killfeed = kills_df
 
-    global killfeed_all_items
     killfeed_all_items = calc_killfeed(
         kills_df_for_killfeed, df, results, steamid_to_name, hurts_df
     ) or []
@@ -222,6 +364,95 @@ def run_ingestion_analysis():
 
     rows = calc_scoreboard(df, results, kills_df, hurts_df, num_rounds, steamid_to_name)
     _fill_scoreboard(rows)
+    current_loaded_demo_name = demo_name
+
+
+def run_ingestion_analysis():
+    _clear_analysis_results()
+    item = selector.currentItem()
+    if item is None:
+        return
+
+    demo_name = item.text()
+    path = demo_paths.get(demo_name)
+    if not path:
+        return
+
+    demo_file = Path(path).expanduser()
+    if not demo_file.is_file():
+        QMessageBox.warning(
+            win,
+            "Demo not found",
+            f"No file at path for “{demo_name}”:\n\n{demo_file}\n\n"
+            "It may have been moved or renamed. Use File → Open Demo and add it again, "
+            "or fix the path in your demo list.",
+        )
+        return
+
+    progress = QProgressDialog(win)
+    progress.setWindowTitle("Loading demo")
+    progress.setLabelText(f'Loading "{demo_name}"\nParsing demo and running model.')
+    progress.setRange(0, 0)
+    progress.setCancelButton(None)
+    progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+    progress.setMinimumDuration(0)
+
+    worker = _IngestionWorker(str(demo_file))
+    thread = QThread(win)
+    worker.moveToThread(thread)
+
+    timer = QTimer(win)
+    timer.setInterval(380)
+    phase = [0]
+
+    def tick_loading_label() -> None:
+        phase[0] = (phase[0] + 1) % 4
+        dots = "." * phase[0]
+        progress.setLabelText(
+            f'Loading "{demo_name}"{dots}\nParsing demo and running model.'
+        )
+
+    def cleanup_progress() -> None:
+        timer.stop()
+        progress.close()
+        progress.deleteLater()
+        test_ingest_button.setEnabled(True)
+        remove_demo_button.setEnabled(True)
+        QApplication.processEvents()
+
+    def on_finished() -> None:
+        payload = worker._payload
+        cleanup_progress()
+        if payload is None:
+            return
+        df, results, kills_df, hurts_df, num_rounds = payload
+        _apply_ingestion_result(demo_name, df, results, kills_df, hurts_df, num_rounds)
+
+    def on_failed(title: str, msg: str) -> None:
+        cleanup_progress()
+        if title == "Demo not found":
+            QMessageBox.warning(win, title, msg)
+        elif title == "Could not read demo":
+            QMessageBox.critical(win, title, msg)
+        else:
+            QMessageBox.critical(win, title, msg)
+
+    thread.started.connect(worker.run_ingest)
+    worker.finished.connect(on_finished)
+    worker.failed.connect(on_failed)
+    worker.finished.connect(thread.quit)
+    worker.failed.connect(thread.quit)
+    thread.finished.connect(worker.deleteLater)
+    thread.finished.connect(thread.deleteLater)
+
+    timer.timeout.connect(tick_loading_label)
+
+    test_ingest_button.setEnabled(False)
+    remove_demo_button.setEnabled(False)
+    progress.show()
+    QApplication.processEvents()
+    timer.start()
+    thread.start()
 
 
 def _set_player_view(player_name: str):
@@ -367,6 +598,8 @@ button_row = QHBoxLayout()
 test_ingest_button = QPushButton("Analyse Selected Demo")
 test_ingest_button.clicked.connect(run_ingestion_analysis)
 button_row.addWidget(test_ingest_button)
+remove_demo_button = QPushButton("Remove Demo")
+button_row.addWidget(remove_demo_button)
 button_row.addStretch()
 main_layout.addLayout(button_row)
 
@@ -375,6 +608,7 @@ h_split = QSplitter(Qt.Orientation.Horizontal)
 
 left_split = QSplitter(Qt.Orientation.Vertical)
 selector = QListWidget()
+_ui_main["demo_selector"] = selector
 selector.setAlternatingRowColors(True)
 selector.itemClicked.connect(on_demo_selected)
 left_split.addWidget(selector)
@@ -423,7 +657,7 @@ if FigureCanvas is not None and Figure is not None:
     ax_mouse_time.set_title("Mouse Δ magnitude vs tick")
     ax_mouse_time.set_xlabel("Tick (rel. death)")
     ax_mouse_time.set_ylabel("|Δ mouse|")
-    ax_aim.set_title("Aim trace (yaw vs pitch)")
+    ax_aim.set_title("Crosshair path (yaw vs pitch)")
     ax_aim.set_xlabel("yaw (°)")
     ax_aim.set_ylabel("pitch (°)")
     # Keep a stable subplot layout to avoid jitter/shrinking on redraw.
@@ -446,6 +680,37 @@ def _index_at_kill_tick(ticks_abs, kill_tick: int) -> int | None:
     return idx
 
 
+def _plot_crosshair_start_finish(ax_aim, yaw, pitch) -> None:
+    """Mark first and last samples of the plotted window (green Start ▲, blue Finish ▼)."""
+    ya = np.asarray(yaw, dtype=float)
+    pi = np.asarray(pitch, dtype=float)
+    if ya.size < 1 or ya.shape != pi.shape:
+        return
+    ax_aim.scatter(
+        [ya[0]],
+        [pi[0]],
+        s=95,
+        c="tab:green",
+        marker="^",
+        zorder=4,
+        edgecolors="black",
+        linewidths=0.5,
+        label="Start",
+    )
+    if ya.size >= 2:
+        ax_aim.scatter(
+            [ya[-1]],
+            [pi[-1]],
+            s=95,
+            c="tab:blue",
+            marker="v",
+            zorder=4,
+            edgecolors="black",
+            linewidths=0.5,
+            label="Finish",
+        )
+
+
 def _plot_kill_mouse(data: dict):
     if canvas is None or ax_mouse_time is None or ax_aim is None:
         return
@@ -466,13 +731,35 @@ def _plot_kill_mouse(data: dict):
     ax_mouse_time.plot(ticks_rel, mag, linewidth=1.5, color="C0")
     ax_mouse_time.axvline(0, linestyle="--", linewidth=1.0, color="gray")
     ax_mouse_time.axvline(data.get("start_move_rel", 0), linestyle=":", linewidth=1.0, color="C2")
+    tr = np.asarray(ticks_rel, dtype=np.float64)
+    if tr.size >= 1:
+        ax_mouse_time.axvline(float(tr[0]), linestyle="--", linewidth=1.2, color="tab:green", alpha=0.85, label="Start")
+    if tr.size >= 2:
+        ax_mouse_time.axvline(float(tr[-1]), linestyle="--", linewidth=1.2, color="tab:blue", alpha=0.85, label="Finish")
     ax_mouse_time.set_title("Mouse Δ magnitude vs tick")
     ax_mouse_time.set_xlabel("Tick (rel. death)")
     ax_mouse_time.set_ylabel("|Δ mouse|")
     ax_mouse_time.grid(True, alpha=0.25)
+    if tr.size >= 1:
+        ax_mouse_time.legend(loc="upper right", fontsize=7)
 
     yaw = data.get("yaw")
     pitch = data.get("pitch")
+    fire_mask = data.get("fire_mask")
+
+    def _scatter_shots_only(y_arr, p_arr, colors, *, fallback_c=None):
+        """Dots only on discrete shots (shots_fired↑ or FIRE rising edge). No dots if neither column usable."""
+        if fire_mask is None or len(fire_mask) != len(y_arr):
+            return
+        idx = np.flatnonzero(fire_mask)
+        if idx.size == 0:
+            return
+        ys, ps = np.asarray(y_arr)[idx], np.asarray(p_arr)[idx]
+        if fallback_c is not None:
+            ax_aim.scatter(ys, ps, s=10, c=fallback_c, zorder=2, alpha=0.9)
+        else:
+            ax_aim.scatter(ys, ps, s=10, c=colors[idx], zorder=2, alpha=0.9)
+
     if yaw is not None and pitch is not None and len(yaw) == len(pitch) and len(yaw) > 0:
         if (
             len(mag) == len(yaw)
@@ -503,8 +790,19 @@ def _plot_kill_mouse(data: dict):
             lc.set_array(seg_speed)
             ax_aim.add_collection(lc)
 
-            # Keep dots fixed color as requested.
-            ax_aim.scatter(yaw, pitch, s=10, c="C3", zorder=2, alpha=0.9)
+            # Point colours = average RGBA of adjacent segment colours (speed gradient on either side).
+            seg_rgba = speed_cmap(norm(seg_speed))
+            n = len(yaw)
+            pt_rgba = np.empty((n, 4), dtype=float)
+            pt_rgba[0] = seg_rgba[0]
+            pt_rgba[-1] = seg_rgba[-1]
+            if n > 2:
+                pt_rgba[1:-1] = 0.5 * (seg_rgba[:-1] + seg_rgba[1:])
+            np.clip(pt_rgba, 0.0, 1.0, out=pt_rgba)
+            _scatter_shots_only(yaw, pitch, pt_rgba)
+
+            # Window start / finish flags (first and last tick in this plot).
+            _plot_crosshair_start_finish(ax_aim, yaw, pitch)
 
             # Draw colorbar in an inset axis so the main aim axis size stays fixed.
             cax = ax_aim.inset_axes([1.02, 0.10, 0.03, 0.80])
@@ -512,21 +810,22 @@ def _plot_kill_mouse(data: dict):
             cbar.set_label("Mouse speed |Δ mouse|", fontsize=8)
             cbar.ax.tick_params(labelsize=7)
         else:
-            # Fallback: fixed-color line and points.
+            # Fallback: fixed-color line; dots only on FIRE ticks when mask available.
             ax_aim.plot(yaw, pitch, "-", color="C3", linewidth=1.4, alpha=0.85, zorder=1)
-            ax_aim.scatter(yaw, pitch, s=10, c="C3", zorder=2, alpha=0.9)
+            _scatter_shots_only(yaw, pitch, None, fallback_c="C3")
+            _plot_crosshair_start_finish(ax_aim, yaw, pitch)
         if kill_idx is not None and kill_idx < len(yaw):
             ax_aim.scatter(
                 [yaw[kill_idx]],
                 [pitch[kill_idx]],
                 s=55,
                 c="red",
-                zorder=3,
+                zorder=5,
                 marker="*",
                 label="kill tick",
             )
-            ax_aim.legend(loc="best", fontsize=7)
-        ax_aim.set_title("Aim trace (yaw vs pitch)")
+        ax_aim.legend(loc="best", fontsize=7)
+        ax_aim.set_title("Crosshair path (yaw vs pitch)")
         ax_aim.set_xlabel("yaw (°)")
         ax_aim.set_ylabel("pitch (°)")
     else:
@@ -540,7 +839,7 @@ def _plot_kill_mouse(data: dict):
             fontsize=10,
             color="gray",
         )
-        ax_aim.set_title("Aim trace (yaw vs pitch)")
+        ax_aim.set_title("Crosshair path (yaw vs pitch)")
     ax_aim.grid(True, alpha=0.25)
 
     canvas.draw()
@@ -559,6 +858,86 @@ scoreboard.setMinimumSize(0, 0)
 scoreboard.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 scoreboard.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 right_split.addWidget(scoreboard)
+
+
+def _clear_analysis_results() -> None:
+    """Reset panels after the loaded demo is removed or cleared."""
+    global current_df, current_kills_df, current_steamid_to_name, killfeed_all_items
+    global current_loaded_demo_name
+
+    current_df = None
+    current_kills_df = None
+    current_steamid_to_name = None
+    current_loaded_demo_name = None
+    killfeed_all_items = []
+
+    kill_feed_list.clear()
+    kill_filter_killer.blockSignals(True)
+    kill_filter_weapon.blockSignals(True)
+    kill_filter_killer.clear()
+    kill_filter_weapon.clear()
+    kill_filter_killer.addItem("All")
+    kill_filter_weapon.addItem("All")
+    kill_filter_killer.blockSignals(False)
+    kill_filter_weapon.blockSignals(False)
+
+    player_view_list.clear()
+    scoreboard.setRowCount(0)
+
+    if canvas is not None and ax_mouse_time is not None and ax_aim is not None:
+        fig = canvas.figure
+        for extra_ax in list(fig.axes):
+            if extra_ax not in (ax_mouse_time, ax_aim):
+                fig.delaxes(extra_ax)
+        ax_mouse_time.clear()
+        ax_aim.clear()
+        ax_mouse_time.set_title("Mouse Δ magnitude vs tick")
+        ax_mouse_time.set_xlabel("Tick (rel. death)")
+        ax_mouse_time.set_ylabel("|Δ mouse|")
+        ax_mouse_time.grid(True, alpha=0.25)
+        ax_aim.set_title("Crosshair path (yaw vs pitch)")
+        ax_aim.set_xlabel("yaw (°)")
+        ax_aim.set_ylabel("pitch (°)")
+        ax_aim.text(
+            0.5,
+            0.5,
+            "No pitch/yaw in tick data",
+            ha="center",
+            va="center",
+            transform=ax_aim.transAxes,
+            fontsize=10,
+            color="gray",
+        )
+        ax_aim.grid(True, alpha=0.25)
+        canvas.draw()
+
+
+def on_remove_selected_demo():
+    row = selector.currentRow()
+    if row < 0:
+        QMessageBox.information(win, "Remove demo", "Select a demo in the list first.")
+        return
+    item = selector.currentItem()
+    name = (item.text() or "").strip()
+    if not name or name not in demo_paths:
+        return
+    reply = QMessageBox.question(
+        win,
+        "Remove demo",
+        f'Remove "{name}" from the list?\n\nThis does not delete the .dem file.',
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+    )
+    if reply != QMessageBox.StandardButton.Yes:
+        return
+    demo_paths.pop(name, None)
+    selector.takeItem(row)
+    _persist_demo_paths()
+    if name == current_loaded_demo_name:
+        _clear_analysis_results()
+
+
+remove_demo_button.clicked.connect(on_remove_selected_demo)
 
 h_split.addWidget(left_split)
 h_split.addWidget(right_split)

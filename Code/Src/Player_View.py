@@ -102,6 +102,7 @@ def compute_kill_mouse_window(
       - ticks_rel: np.ndarray (tick - kill_tick)
       - dx, dy, mag: np.ndarray
       - start_move_tick: int | None
+      - fire_mask: np.ndarray bool | None — discrete shots only (shots_fired increments, else FIRE rising edges)
     """
     if df is None or df.empty or kill_tick is None:
         return None
@@ -118,7 +119,7 @@ def compute_kill_mouse_window(
     t1 = kt + int(post_death_ticks)
 
     base_cols = ["tick", "usercmd_mouse_dx", "usercmd_mouse_dy"]
-    extra_cols = [c for c in ("pitch", "yaw") if c in df.columns]
+    extra_cols = [c for c in ("pitch", "yaw", "FIRE", "shots_fired") if c in df.columns]
     sub = df.loc[
         (df["name"] == name) & (df["tick"].between(t0, t1)),
         base_cols + extra_cols,
@@ -191,6 +192,48 @@ def compute_kill_mouse_window(
             yaw_unwrapped = np.degrees(np.unwrap(np.radians(yaw_arr)))
             out["pitch"] = pitch_arr
             out["yaw"] = yaw_unwrapped
+            out["fire_mask"] = _discrete_shot_mask(sub, sub_w)
 
     return out
+
+
+def _discrete_shot_mask(sub: pd.DataFrame, sub_w: pd.DataFrame) -> np.ndarray | None:
+    n = len(sub_w)
+    if n == 0:
+        return None
+    tw = sub_w["tick"].to_numpy()
+    first_t = int(tw[0])
+    prev_rows = sub.loc[sub["tick"] < first_t]
+
+    if "shots_fired" in sub_w.columns:
+        sh = pd.to_numeric(sub_w["shots_fired"], errors="coerce").fillna(0).to_numpy(dtype=float)
+        if len(prev_rows):
+            prev_sh = float(
+                pd.to_numeric(prev_rows["shots_fired"], errors="coerce").fillna(0).iloc[-1]
+            )
+        else:
+            prev_sh = None
+        mask = np.zeros(n, dtype=bool)
+        if prev_sh is not None:
+            mask[0] = sh[0] > prev_sh
+        if n > 1:
+            mask[1:] = sh[1:] > sh[:-1]
+        return mask
+
+    if "FIRE" in sub_w.columns:
+        fv = pd.to_numeric(sub_w["FIRE"], errors="coerce").fillna(0).to_numpy(dtype=float)
+        firing = fv > 0
+        if len(prev_rows):
+            prev_fire = (
+                float(pd.to_numeric(prev_rows["FIRE"], errors="coerce").fillna(0).iloc[-1]) > 0
+            )
+        else:
+            prev_fire = False
+        mask = np.zeros(n, dtype=bool)
+        mask[0] = bool(firing[0]) and not prev_fire
+        if n > 1:
+            mask[1:] = firing[1:] & (~firing[:-1])
+        return mask
+
+    return None
 
