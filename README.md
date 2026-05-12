@@ -76,7 +76,7 @@ Create and activate a virtual environment.
 For Bash/Zsh:
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 ```
 
@@ -96,8 +96,7 @@ pip install -r Requirements.txt
 Run the application:
 
 ```bash
-cd Code
-python UI.py
+python3 Src/UI.py
 ```
 
 ---
@@ -150,8 +149,7 @@ pip install -r Requirements.txt
 Run the application:
 
 ```powershell
-cd Code
-python UI.py
+python Src/UI.py
 ```
 
 ---
