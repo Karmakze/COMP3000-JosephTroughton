@@ -174,7 +174,6 @@ def _prompt_demo_display_name(path_str: str) -> str | None:
 
 
 class MainWindow(QMainWindow):
-    """Main window with drag-and-drop for .dem / .dem.gz files."""
 
     def __init__(self) -> None:
         super().__init__()
