@@ -68,7 +68,7 @@ Clone the repository:
 
 ```bash
 git clone https://github.com/Karmakze/COMP3000-JosephTroughton.git
-cd COMP3000-JosephTroughton
+cd COMP3000-JosephTroughton/Code
 ```
 
 Create and activate a virtual environment.
@@ -108,7 +108,7 @@ Open PowerShell and clone the repository:
 
 ```powershell
 git clone https://github.com/Karmakze/COMP3000-JosephTroughton.git
-cd COMP3000-JosephTroughton
+cd COMP3000-JosephTroughton/Code
 ```
 
 Create a virtual environment:
